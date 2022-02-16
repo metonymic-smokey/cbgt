@@ -417,15 +417,14 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	}
 
 	_, currPIndexes := mgr.CurrentMaps()
-	// if a planpidx here is cold, it should be closed.
-	for _, pidx := range planPIndexes.PlanPIndexes {
-		log.Printf("janitor: planpidx: %s, hib status %d", pidx.Name, pidx.Hibernate)
-	}
 
 	mapWantedPlanPIndex := mgr.reusablePIndexesPlanMap(currPIndexes, planPIndexes)
 	addPlanPIndexes, removePIndexes :=
 		CalcPIndexesDelta(mgr.uuid, currPIndexes, planPIndexes, mapWantedPlanPIndex)
 	log.Printf("janitor: length of add plan pidxs: %d", len(addPlanPIndexes))
+	for _, app := range addPlanPIndexes {
+		log.Printf("janitor: add plan pidx: %s, status: %d", app.Name, app.Hibernate)
+	}
 
 	// check for any pindexes for restart and get classified lists of
 	// pindexes to add, remove and restart
@@ -452,6 +451,8 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 		if err != nil {
 			log.Printf("janitor: error hibernating pindex %s: %e", pi.Name, err)
 		}
+		feedName := FeedNameForPIndex(pi, feedAllotment)
+		log.Printf("feedname for pindex %s: %s", pi.Name, feedName)
 	}
 	log.Printf("janitor: pindexes to activate: %d", len(pindexesToActivate))
 	for _, pi := range pindexesToActivate {
@@ -490,7 +491,6 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 
 	var currFeeds map[string]Feed
 	currFeeds, currPIndexes = mgr.CurrentMaps()
-
 	// remove feed from "stopped" pindexes, if canwrite is true. If canwrite is false, it will be removed.
 	// print plan here and check - if canWrite is false, should remove the feeds anyways
 	// removing feeds from cold planpindexes.
@@ -623,6 +623,7 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 
 				pindexImplType, exists := PIndexImplTypes[pindex.IndexType]
 				if !exists || pindexImplType == nil {
+					log.Printf("new pindex...")
 					pindexesToRemove = append(pindexesToRemove, pindexes...)
 					planPIndexesToAdd = append(planPIndexesToAdd, planPIndexes...)
 					continue
@@ -671,6 +672,7 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 					// log.Printf("Warm index: %s", indexName)
 					continue
 				} else {
+					log.Printf("janitor: last resort...")
 					pindexesToRemove = append(pindexesToRemove, pindexes...)
 				}
 				// 	pindexesToRemove = append(pindexesToRemove, pindexes...)
@@ -1009,6 +1011,18 @@ func CalcPIndexesDelta(mgrUUID string,
 				removePIndexes = append(removePIndexes, currPIndex)
 				mapRemovePIndex[currPIndex.Name] = currPIndex
 			}
+		} else {
+			// exists in wantedPlanPIndex and hence, 'wanted' - will never be included for removal.
+			// but needs to be hibernated later, not removed like the others.
+			// hibernated instead of removed in classifyAddRemoveRestartPIndexes func.
+			// cannot change reuablePlanPIndexesMap function since that filters for reloadable pindexes
+			// i.e. still involved in an ongoing plan
+			// Pindexes to be hibernated are frozen i.e. not involved in any plan since no further plan change
+			// hence, these have to be filtered out here.
+			if planPidx := mapWantedPlanPIndex[currPIndex.Name]; planPidx.Hibernate == Cold {
+				log.Printf("janitor: exists in current plan, but should be hibernated")
+				removePIndexes = append(removePIndexes, currPIndex)
+			}
 		}
 	}
 
@@ -1030,6 +1044,7 @@ func CalcFeedsDelta(nodeUUID string, planPIndexes *PlanPIndexes,
 	// but a single feed may be emitting to multiple pindexes.
 	groupedPIndexes := make(map[string][]*PIndex)
 	for _, pindex := range pindexes {
+		// log.Printf("feed for pindex %s", pindex.Name)
 		planPIndex, exists := planPIndexes.PlanPIndexes[pindex.Name]
 		if exists && planPIndex != nil &&
 			PlanPIndexNodeCanWrite(planPIndex.Nodes[nodeUUID]) {
@@ -1039,9 +1054,14 @@ func CalcFeedsDelta(nodeUUID string, planPIndexes *PlanPIndexes,
 		}
 	}
 
+	log.Printf("grouped pindexes: %+v", groupedPIndexes)
 	removedFeeds := map[string]bool{}
 
 	for feedName, feedPIndexes := range groupedPIndexes {
+		log.Printf("feed name: %s")
+		for _, fp := range feedPIndexes {
+			log.Printf("feed partition name: ", fp.Name)
+		}
 		currFeed, currFeedExists := currFeeds[feedName]
 		if !currFeedExists {
 			addFeeds = append(addFeeds, feedPIndexes)
@@ -1075,6 +1095,7 @@ func CalcFeedsDelta(nodeUUID string, planPIndexes *PlanPIndexes,
 	}
 
 	for currFeedName, currFeed := range currFeeds {
+		log.Printf("currFeed name: %s", currFeedName)
 		if _, exists := groupedPIndexes[currFeedName]; !exists {
 			if !removedFeeds[currFeedName] {
 				removeFeeds = append(removeFeeds, currFeed)
