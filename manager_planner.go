@@ -9,12 +9,14 @@
 package cbgt
 
 import (
+	"bytes"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/couchbase/blance"
 	log "github.com/couchbase/clog"
@@ -81,6 +83,38 @@ func NoopPlannerHook(x PlannerHookInfo) (PlannerHookInfo, bool, error) {
 	return x, false, nil
 }
 
+// stops a pindex without unregistering or removing files from disk
+func (mgr *Manager) TempClosePIndex(pindex *PIndex) error {
+	// First, stop any feeds that might be sending to the pindex's dest.
+	log.Printf("temporarily closed pindex %s", pindex.Name)
+	feeds, _ := mgr.CurrentMaps()
+	for _, feed := range feeds {
+		for _, dest := range feed.Dests() {
+			if dest == pindex.Dest {
+				err := mgr.stopFeed(feed)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	if pindex.Dest != nil {
+		buf := bytes.NewBuffer(nil)
+		buf.Write([]byte(fmt.Sprintf(
+			`{"event":"tempClosePIndex","name":"%s","time":"%s","stats":`,
+			pindex.Name, time.Now().Format(time.RFC3339Nano))))
+		err := pindex.Dest.Stats(buf)
+		if err == nil {
+			buf.Write(JsonCloseBrace)
+			mgr.AddEvent(buf.Bytes())
+		}
+	}
+
+	// pindex.closed = true // error: no planpindexes
+	return pindex.Close(false) // always false since it never needs to be removed
+}
+
 // -------------------------------------------------------
 
 // NOTE: You *must* update VERSION if the planning algorithm or config
@@ -127,6 +161,7 @@ func (mgr *Manager) PlannerLoop() {
 				case e := <-ec:
 					atomic.AddUint64(&mgr.stats.TotPlannerSubscriptionEvent, 1)
 					mgr.PlannerKick("cfg changed, key: " + e.Key)
+					log.Printf("so there is some change in cfg, hence planner channel is hit...")
 				}
 			}
 		}()
@@ -222,8 +257,20 @@ func Plan(cfg Cfg, version, uuid, server string, options map[string]string,
 		return false, fmt.Errorf("planner: CalcPlan, err: %v", err)
 	}
 
+	// should be set to the correct hib status here - set in calc plan
+	log.Printf("status after calc plan...")
+	for _, pidx := range planPIndexesPrev.PlanPIndexes {
+		log.Printf("plan pindexes prev %s: status %d", pidx.Name, pidx.Hibernate)
+	} // should be diff from planpindexes since that's changed in the func
+	for _, pidx := range planPIndexes.PlanPIndexes {
+		log.Printf("plan pindexes %s: status %d", pidx.Name, pidx.Hibernate)
+	}
+
 	if SamePlanPIndexes(planPIndexes, planPIndexesPrev) {
+		log.Printf("same plan")
 		return false, nil
+	} else {
+		log.Printf("not same plan")
 	}
 
 	_, err = CfgSetPlanPIndexes(cfg, planPIndexes, cas)
@@ -462,9 +509,21 @@ func CalcPlan(mode string, indexDefs *IndexDefs, nodeDefs *NodeDefs,
 		}
 		indexDef = pho.IndexDef
 
+		log.Printf("planner: initial length of planpindexesprev: %d", len(planPIndexesPrev.PlanPIndexes))
+		log.Printf("planner: initial length of planpindexes: %d", len(planPIndexes.PlanPIndexes))
+
+		if CasePlanHibernated(indexDef, planPIndexesPrev, planPIndexes) {
+			log.Printf("planner: hibernated")
+			for _, pidx := range planPIndexes.PlanPIndexes {
+				log.Printf("planner: hibernated planpidx: %s, status: %d", pidx.Name, pidx.Hibernate)
+			}
+			continue
+		}
+
 		// If the plan is frozen, CasePlanFrozen clones the previous
 		// plan for this index.
 		if CasePlanFrozen(indexDef, planPIndexesPrev, planPIndexes) {
+			log.Printf("Plan frozen for index: %s", indexDef.Name)
 			continue
 		}
 
@@ -539,6 +598,7 @@ func CalcPlan(mode string, indexDefs *IndexDefs, nodeDefs *NodeDefs,
 
 	_, _, err = plannerHookCall("end", nil, nil)
 
+	log.Printf("planner: length of planpindexes: %d", len(planPIndexes.PlanPIndexes))
 	return planPIndexes, err
 }
 
@@ -925,7 +985,8 @@ func sameIndexDefsExceptUUID(def1, def2 *IndexDef) bool {
 		def1.SourceName == def2.SourceName &&
 		def1.SourceType == def2.SourceType &&
 		def1.SourceUUID == def2.SourceUUID &&
-		def1.SourceParams == def2.SourceParams)
+		def1.SourceParams == def2.SourceParams &&
+		def1.HibernateStatus == def2.HibernateStatus)
 }
 
 // --------------------------------------------------------
@@ -952,6 +1013,60 @@ func CasePlanFrozen(indexDef *IndexDef,
 				endPlanPIndexes.PlanPIndexes[n] = p
 			}
 		}
+	}
+
+	return true
+}
+
+func CasePlanHibernated(indexDef *IndexDef,
+	begPlanPIndexes, endPlanPIndexes *PlanPIndexes) bool {
+	if begPlanPIndexes != nil && endPlanPIndexes != nil {
+		for n, p := range begPlanPIndexes.PlanPIndexes {
+			if p.IndexName == indexDef.Name &&
+				(p.IndexUUID == indexDef.UUID ||
+					sameIndexDefsExceptUUID(indexDef,
+						getIndexDefFromPlanPIndexes([]*PlanPIndex{p}))) {
+				temp := *p // for copy by val
+				endPlanPIndexes.PlanPIndexes[n] = &temp
+				if endPlanPIndexes.PlanPIndexes[n] == p {
+					log.Printf("two equal pointers in a copy by val...sigh...")
+				}
+				if indexDef.HibernateStatus == Cold {
+					for _, pidx := range endPlanPIndexes.PlanPIndexes {
+						log.Printf("planner: case plan hib: setting to cold")
+						pidx.Hibernate = Cold
+						for nodename := range pidx.Nodes {
+							pidx.Nodes[nodename].CanWrite = false
+						}
+					}
+				} else if indexDef.HibernateStatus == Warm {
+					for _, pidx := range endPlanPIndexes.PlanPIndexes {
+						pidx.Hibernate = Warm
+						for nodename := range pidx.Nodes {
+							pidx.Nodes[nodename].CanWrite = true
+						}
+					}
+				} else if indexDef.HibernateStatus == Hot {
+					for _, pidx := range endPlanPIndexes.PlanPIndexes {
+						pidx.Hibernate = Hot
+						for nodename := range pidx.Nodes {
+							pidx.Nodes[nodename].CanWrite = true
+						}
+					}
+				}
+			}
+		}
+	}
+	log.Printf("planner: length of end plan pindexes: %d", len(endPlanPIndexes.PlanPIndexes))
+	log.Printf("planner: endplan pindexes: %+v", endPlanPIndexes.PlanPIndexes)
+
+	// case plan hibernated - new func - similar - create new plan(copy by val) - l: 1040 - before caseplanfrozen.
+
+	// first copy by val
+	// next, change hibernate related vals in curr planpidxs
+	// should not copy in casePlanFrozen -so comment out the call
+	if indexDef.HibernateStatus != Cold {
+		return false
 	}
 
 	return true

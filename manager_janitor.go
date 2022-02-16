@@ -335,6 +335,66 @@ func (mgr *Manager) pindexesRestart(
 	return errs
 }
 
+func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) error {
+	// rename the pindex folder and name as per the new plan
+	newPath := mgr.PIndexPath(pi.planPIndexName)
+	if newPath != pi.pindex.Path {
+		err := os.Rename(pi.pindex.Path, newPath)
+		if err != nil {
+			cleanDir(pi.pindex.Path)
+			cleanDir(newPath)
+			return fmt.Errorf("janitor: restartPIndex"+
+				" updating pindex: %s path: %s failed, err: %v",
+				pi.pindex.Name, newPath, err)
+		}
+	}
+	pi2 := pi.pindex.Clone()
+	log.Printf("old pindex name: %s", pi2.Name)
+	pi2.Name = pi.planPIndexName
+	log.Printf("new pindex name: %s", pi2.Name)
+	pi2.Path = newPath
+
+	_ = mgr.unregisterPIndex(pi.pindex.Name, pi.pindex)
+	// unreg here, not in tempClose, since after this, this pidx won't be used anymore
+	// in cold, it might need to be used again, so just tempClose not unreg.
+
+	// persist PINDEX_META only if manager's dataDir is set
+	if len(mgr.dataDir) > 0 {
+		// update the new indexdef param changes
+		buf, err := json.Marshal(pi2)
+		if err != nil {
+			cleanDir(newPath)
+			return fmt.Errorf("janitor: tempRestartPIndex"+
+				" Marshal pindex: %s, err: %v", pi2.Name, err)
+
+		}
+		err = ioutil.WriteFile(pi2.Path+string(os.PathSeparator)+
+			PINDEX_META_FILENAME, buf, 0600)
+		if err != nil {
+			cleanDir(pi2.Path)
+			return fmt.Errorf("janitor: tempRestartPIndex could not save "+
+				"PINDEX_META_FILENAME,"+" path: %s, err: %v", pi2.Path, err)
+		}
+	}
+
+	// open the pindex and register
+	// since this is done for hot indexes, an open pidx intuitively makes sense since
+	// a hot pidx is one that is queried freq and so it should be open
+	pindex, err := OpenPIndex(mgr, pi2.Path)
+	if err != nil {
+		cleanDir(pi2.Path)
+		return fmt.Errorf("janitor: tempRestartPIndex could not open "+
+			" pindex path: %s, err: %v", pi2.Path, err)
+	}
+	err = mgr.registerPIndex(pindex)
+	if err != nil {
+		cleanDir(pindex.Path)
+		return fmt.Errorf("janitor: tempRestartPIndex failed to "+
+			"register pindex: %s, err: %v", pindex.Name, err)
+	}
+	return nil
+}
+
 // JanitorOnce is the main body of a JanitorLoop.
 func (mgr *Manager) JanitorOnce(reason string) error {
 	if mgr.cfg == nil { // Can occur during testing.
@@ -357,15 +417,20 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	}
 
 	_, currPIndexes := mgr.CurrentMaps()
+	// if a planpidx here is cold, it should be closed.
+	for _, pidx := range planPIndexes.PlanPIndexes {
+		log.Printf("janitor: planpidx: %s, hib status %d", pidx.Name, pidx.Hibernate)
+	}
 
 	mapWantedPlanPIndex := mgr.reusablePIndexesPlanMap(currPIndexes, planPIndexes)
 	addPlanPIndexes, removePIndexes :=
 		CalcPIndexesDelta(mgr.uuid, currPIndexes, planPIndexes, mapWantedPlanPIndex)
+	log.Printf("janitor: length of add plan pidxs: %d", len(addPlanPIndexes))
 
 	// check for any pindexes for restart and get classified lists of
 	// pindexes to add, remove and restart
-	planPIndexesToAdd, pindexesToRemove, pindexesToRestart :=
-		classifyAddRemoveRestartPIndexes(mgr, addPlanPIndexes, removePIndexes)
+	planPIndexesToAdd, pindexesToRemove, pindexesToRestart, pindexesToHibernate,
+		pindexesToActivate := classifyAddRemoveRestartPIndexes(mgr, addPlanPIndexes, removePIndexes)
 	log.Printf("janitor: pindexes to remove: %d", len(pindexesToRemove))
 	for _, pi := range pindexesToRemove {
 		log.Printf("  pindex: %v; UUID: %v", pi.Name, pi.IndexUUID)
@@ -380,9 +445,34 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 			log.Printf("  pindex: %v; UUID: %v", pi.pindex.Name, pi.pindex.IndexUUID)
 		}
 	}
+	log.Printf("janitor: pindexes to hibernate: %d", len(pindexesToHibernate))
+	for _, pi := range pindexesToHibernate {
+		log.Printf(" pindex: %v; UUID: %v", pi.Name, pi.IndexUUID)
+		err = mgr.TempClosePIndex(pi)
+		if err != nil {
+			log.Printf("janitor: error hibernating pindex %s: %e", pi.Name, err)
+		}
+	}
+	log.Printf("janitor: pindexes to activate: %d", len(pindexesToActivate))
+	for _, pi := range pindexesToActivate {
+		if pi.pindex != nil {
+			if !pi.pindex.closed { // in case, closing when cold was interrupted/didn't happen
+				err = mgr.TempClosePIndex(pi.pindex)
+				if err != nil {
+					log.Printf("janitor: error hibernating pindex %s: %e", pi.pindex.Name, err)
+				}
+			}
+			err = mgr.TempOpenPIndex(pi)
+			if err != nil {
+				log.Printf("janitor: error temp opening pindex: %e", err)
+			}
+		}
+	}
+
 	// restart any of the pindexes so that they can
 	// adopt the updated indexDef parameters, ex: storeOptions
 	restartErrs := mgr.pindexesRestart(pindexesToRestart)
+	// similar to restart - pidxsToHibernate - based on Hib status, apply some hib actions
 	// upon any restart errors, bring back the addPlanPIndex for
 	// starting the pindex afresh
 	if len(restartErrs) > 0 {
@@ -400,6 +490,10 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 
 	var currFeeds map[string]Feed
 	currFeeds, currPIndexes = mgr.CurrentMaps()
+
+	// remove feed from "stopped" pindexes, if canwrite is true. If canwrite is false, it will be removed.
+	// print plan here and check - if canWrite is false, should remove the feeds anyways
+	// removing feeds from cold planpindexes.
 
 	addFeeds, removeFeeds :=
 		CalcFeedsDelta(mgr.uuid, planPIndexes, currFeeds, currPIndexes,
@@ -453,6 +547,9 @@ func filterFeedable(addFeeds [][]*PIndex) (rv [][]*PIndex) {
 	for _, pindexes := range addFeeds {
 		plist := make([]*PIndex, 0, len(pindexes))
 		for _, pindex := range pindexes {
+			if pindex.closed { //closed pindexes are not feedable
+				continue
+			}
 			ready, err := pindex.IsFeedable()
 			if ready && err == nil {
 				plist = append(plist, pindex)
@@ -468,16 +565,24 @@ func filterFeedable(addFeeds [][]*PIndex) (rv [][]*PIndex) {
 	return rv
 }
 
+const (
+	HIBERNATE_PINDEX = "hibernatePIndex"
+	ACTIVATE_PINDEX  = "activatePIndex"
+)
+
 func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPIndex,
 	removePIndexes []*PIndex) (planPIndexesToAdd []*PlanPIndex,
-	pindexesToRemove []*PIndex, pindexesToRestart []*pindexRestartReq) {
+	pindexesToRemove []*PIndex, pindexesToRestart []*pindexRestartReq,
+	pindexesToHibernate []*PIndex, pindexesToActivate []*pindexRestartReq) {
 	// if there are no pindexes to be removed as per planner,
 	// then there won't be anything to restart as well.
 	if len(removePIndexes) == 0 {
-		return addPlanPIndexes, nil, nil
+		return addPlanPIndexes, nil, nil, nil, nil
 	}
 	pindexesToRestart = make([]*pindexRestartReq, 0)
 	pindexesToRemove = make([]*PIndex, 0)
+	pindexesToHibernate = make([]*PIndex, 0)
+	pindexesToActivate = make([]*pindexRestartReq, 0)
 	planPIndexesToAdd = make([]*PlanPIndex, 0)
 	// grouping addPlanPIndexes and removePIndexes as per index for
 	// checking restartable indexDef changes per index
@@ -493,11 +598,14 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 
 	// avoid pindex rebuild on replica updates on index defn
 	// unless overridden
-	if v, ok := mgr.Options()["rebuildOnReplicaUpdate"]; !ok ||
-		v != "true" {
-		return advPIndexClassifier(indexPIndexMap, indexPlanPIndexMap)
-	}
+	/*
+		if v, ok := mgr.Options()["rebuildOnReplicaUpdate"]; !ok ||
+			v != "true" {
+			return advPIndexClassifier(indexPIndexMap, indexPlanPIndexMap)
+		}
+	*/
 
+	var indexDefsMap map[string]*IndexDef
 	// take every pindex to remove and check the config change
 	// and sort out the pindexes to add, remove or restart
 	for indexName, pindexes := range indexPIndexMap {
@@ -519,28 +627,79 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 					planPIndexesToAdd = append(planPIndexesToAdd, planPIndexes...)
 					continue
 				}
-				if pindexImplType.AnalyzeIndexDefUpdates != nil &&
+				if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
+					// if there is a hot to cold change, run tempClose on pindexes
+					log.Printf("janitor: phase change to cold")
+					pindexesToHibernate = append(pindexesToHibernate, pindexes...)
+					continue
+				}
+				if phaseChange(configAnalyzeReq) == ACTIVATE_PINDEX {
+					// if there is a cold/warm to hot change,
+					//rename existing pidxs to match current plan
+					log.Printf("janitor: phase change to hot")
+					pindexesToActivate = append(pindexesToActivate,
+						getPIndexesToRestart(pindexes, planPIndexes)...)
+					continue
+				} else if pindexImplType.AnalyzeIndexDefUpdates != nil &&
 					pindexImplType.AnalyzeIndexDefUpdates(configAnalyzeReq) ==
 						PINDEXES_RESTART {
 					pindexesToRestart = append(pindexesToRestart,
 						getPIndexesToRestart(pindexes, planPIndexes)...)
 					continue
+				} else {
+					pindexesToRemove = append(pindexesToRemove, pindexes...)
+					planPIndexesToAdd = append(planPIndexesToAdd, planPIndexes...)
 				}
-				pindexesToRemove = append(pindexesToRemove, pindexes...)
-				planPIndexesToAdd = append(planPIndexesToAdd, planPIndexes...)
-			} else {
-				pindexesToRemove = append(pindexesToRemove, pindexes...)
+			} else { //if not part of the planned pindexes.
+				log.Printf("cold and warm indexes likely end up here...")
+				// on transition to warm/cold, pindexes end up here.
+				// hence, for pindexes of cold indexes need to be hibernated.
+				var err error
+				if indexDefsMap == nil {
+					_, indexDefsMap, err = mgr.GetIndexDefs(true)
+					if err != nil {
+						log.Printf("janitor: error getting index defs from mgr: %e", err)
+						continue
+					}
+				}
+
+				if idx, ok := indexDefsMap[indexName]; ok && idx.HibernateStatus == Cold {
+					//hibernating all pindexes of a cold index.
+					pindexesToHibernate = append(pindexesToHibernate, pindexes...)
+				} else if idx, ok := indexDefsMap[indexName]; ok && idx.HibernateStatus == Warm {
+					// what to do here?
+					// log.Printf("Warm index: %s", indexName)
+					continue
+				} else {
+					pindexesToRemove = append(pindexesToRemove, pindexes...)
+				}
+				// 	pindexesToRemove = append(pindexesToRemove, pindexes...)
 			}
 		}
 	}
-	return planPIndexesToAdd, pindexesToRemove, pindexesToRestart
+	return planPIndexesToAdd, pindexesToRemove, pindexesToRestart, pindexesToHibernate,
+		pindexesToActivate
+}
+
+func phaseChange(configAnalyzeReq *ConfigAnalyzeRequest) string {
+	if configAnalyzeReq.IndexDefnCur.HibernateStatus == Cold {
+		log.Printf("janitor: current phase: %d", configAnalyzeReq.IndexDefnCur.HibernateStatus)
+		return HIBERNATE_PINDEX
+	}
+	if configAnalyzeReq.IndexDefnCur.HibernateStatus == Hot {
+		return ACTIVATE_PINDEX
+	}
+	return ""
 }
 
 func advPIndexClassifier(indexPIndexMap map[string][]*PIndex,
 	indexPlanPIndexMap map[string][]*PlanPIndex) (planPIndexesToAdd []*PlanPIndex,
-	pindexesToRemove []*PIndex, pindexesToRestart []*pindexRestartReq) {
+	pindexesToRemove []*PIndex, pindexesToRestart []*pindexRestartReq,
+	pindexesToHibernate, pindexesToActivate []*pindexRestartReq) {
 	pindexesToRestart = make([]*pindexRestartReq, 0)
 	pindexesToRemove = make([]*PIndex, 0)
+	pindexesToHibernate = make([]*pindexRestartReq, 0)
+	pindexesToActivate = make([]*pindexRestartReq, 0)
 	planPIndexesToAdd = make([]*PlanPIndex, 0)
 
 	// take every pindex to remove and check the config change
@@ -582,6 +741,16 @@ func advPIndexClassifier(indexPIndexMap map[string][]*PIndex,
 						pindexesToRemove = append(pindexesToRemove, pindex)
 						continue
 					}
+					if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
+						pindexesToHibernate = append(pindexesToHibernate,
+							newPIndexRestartReq(targetPlan, pindex))
+						continue
+					}
+					if phaseChange(configAnalyzeReq) == ACTIVATE_PINDEX {
+						pindexesToActivate = append(pindexesToActivate,
+							newPIndexRestartReq(targetPlan, pindex))
+						continue
+					}
 					// restartable pindex found from plan
 					if pindexImplType.AnalyzeIndexDefUpdates != nil &&
 						pindexImplType.AnalyzeIndexDefUpdates(configAnalyzeReq) ==
@@ -617,7 +786,8 @@ func advPIndexClassifier(indexPIndexMap map[string][]*PIndex,
 		planPIndexesToAdd = append(planPIndexesToAdd, addPlans...)
 	}
 
-	return planPIndexesToAdd, pindexesToRemove, pindexesToRestart
+	return planPIndexesToAdd, pindexesToRemove, pindexesToRestart,
+		pindexesToHibernate, pindexesToActivate
 }
 
 func newPIndexRestartReq(addPlanPI *PlanPIndex,
@@ -670,13 +840,14 @@ func getIndexDefFromPIndex(pindex *PIndex) *IndexDef {
 func getIndexDefFromPlanPIndexes(planPIndexes []*PlanPIndex) *IndexDef {
 	if len(planPIndexes) != 0 && planPIndexes[0] != nil {
 		return &IndexDef{Name: planPIndexes[0].IndexName,
-			UUID:         planPIndexes[0].IndexUUID,
-			SourceName:   planPIndexes[0].SourceName,
-			SourceParams: planPIndexes[0].SourceParams,
-			SourceType:   planPIndexes[0].SourceType,
-			SourceUUID:   planPIndexes[0].SourceUUID,
-			Type:         planPIndexes[0].IndexType,
-			Params:       planPIndexes[0].IndexParams,
+			UUID:            planPIndexes[0].IndexUUID,
+			SourceName:      planPIndexes[0].SourceName,
+			SourceParams:    planPIndexes[0].SourceParams,
+			SourceType:      planPIndexes[0].SourceType,
+			SourceUUID:      planPIndexes[0].SourceUUID,
+			Type:            planPIndexes[0].IndexType,
+			Params:          planPIndexes[0].IndexParams,
+			HibernateStatus: planPIndexes[0].Hibernate,
 		}
 	}
 	return nil
@@ -798,8 +969,7 @@ func CalcPIndexesDelta(mgrUUID string,
 	currPIndexes map[string]*PIndex,
 	wantedPlanPIndexes *PlanPIndexes,
 	mapWantedPlanPIndex map[string]*PlanPIndex) (
-	addPlanPIndexes []*PlanPIndex,
-	removePIndexes []*PIndex) {
+	addPlanPIndexes []*PlanPIndex, removePIndexes []*PIndex) {
 	// For fast transient lookups.
 	if mapWantedPlanPIndex == nil {
 		mapWantedPlanPIndex = map[string]*PlanPIndex{}
@@ -1003,6 +1173,7 @@ func (mgr *Manager) startPIndex(planPIndex *PlanPIndex) error {
 	}
 
 	if pindex == nil {
+		log.Printf("janitor: creating a new pindex")
 		pindex, err = NewPIndex(mgr, planPIndex.Name, NewUUID(),
 			planPIndex.IndexType,
 			planPIndex.IndexName,
@@ -1013,7 +1184,8 @@ func (mgr *Manager) startPIndex(planPIndex *PlanPIndex) error {
 			planPIndex.SourceUUID,
 			planPIndex.SourceParams,
 			planPIndex.SourcePartitions,
-			path)
+			path,
+			planPIndex.Hibernate)
 		if err != nil {
 			return fmt.Errorf("janitor: NewPIndex, name: %s, err: %v",
 				planPIndex.Name, err)

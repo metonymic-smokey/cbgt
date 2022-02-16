@@ -18,6 +18,13 @@ import (
 	"sync"
 
 	"github.com/couchbase/blance"
+	log "github.com/couchbase/clog"
+)
+
+const (
+	Hot int = iota + 1
+	Warm
+	Cold
 )
 
 // JSON/struct definitions of what the Manager stores in the Cfg.
@@ -34,15 +41,16 @@ type IndexDefs struct {
 
 // An IndexDef is a logical index definition.
 type IndexDef struct {
-	Type         string     `json:"type"` // Ex: "blackhole", etc.
-	Name         string     `json:"name"`
-	UUID         string     `json:"uuid"` // Like a revision id.
-	Params       string     `json:"params"`
-	SourceType   string     `json:"sourceType"`
-	SourceName   string     `json:"sourceName,omitempty"`
-	SourceUUID   string     `json:"sourceUUID,omitempty"`
-	SourceParams string     `json:"sourceParams,omitempty"` // Optional connection info.
-	PlanParams   PlanParams `json:"planParams,omitempty"`
+	Type            string     `json:"type"` // Ex: "blackhole", etc.
+	Name            string     `json:"name"`
+	UUID            string     `json:"uuid"` // Like a revision id.
+	Params          string     `json:"params"`
+	SourceType      string     `json:"sourceType"`
+	SourceName      string     `json:"sourceName,omitempty"`
+	SourceUUID      string     `json:"sourceUUID,omitempty"`
+	SourceParams    string     `json:"sourceParams,omitempty"` // Optional connection info.
+	PlanParams      PlanParams `json:"planParams,omitempty"`
+	HibernateStatus int        `json:"hibernateStatus"`
 
 	// NOTE: Any auth credentials to access datasource, if any, may be
 	// stored as part of SourceParams.
@@ -55,13 +63,14 @@ type IndexDef struct {
 // struct definition.  If you change IndexDef struct, you must change
 // this indexDefBase definition, too; and also see defs_json.go.
 type indexDefBase struct {
-	Type       string     `json:"type"` // Ex: "blackhole", etc.
-	Name       string     `json:"name"`
-	UUID       string     `json:"uuid"` // Like a revision id.
-	SourceType string     `json:"sourceType"`
-	SourceName string     `json:"sourceName,omitempty"`
-	SourceUUID string     `json:"sourceUUID,omitempty"`
-	PlanParams PlanParams `json:"planParams,omitempty"`
+	Type            string     `json:"type"` // Ex: "blackhole", etc.
+	Name            string     `json:"name"`
+	UUID            string     `json:"uuid"` // Like a revision id.
+	SourceType      string     `json:"sourceType"`
+	SourceName      string     `json:"sourceName,omitempty"`
+	SourceUUID      string     `json:"sourceUUID,omitempty"`
+	PlanParams      PlanParams `json:"planParams,omitempty"`
+	HibernateStatus int        `json:"hibernateStatus"`
 }
 
 // A PlanParams holds input parameters to the planner, that control
@@ -119,6 +128,8 @@ type PlanParams struct {
 	// there was no previous plan.  Defaults to false (allow
 	// re-planning).
 	PlanFrozen bool `json:"planFrozen,omitempty"`
+
+	ClosePIndexes bool `json:"closePIndexes,omitempty"` // add omitempty after testing phase
 }
 
 // A NodePlanParam defines whether a particular node can service a
@@ -231,6 +242,7 @@ type PlanPIndex struct {
 	SourceUUID       string `json:"sourceUUID,omitempty"`
 	SourceParams     string `json:"sourceParams,omitempty"` // Optional connection info.
 	SourcePartitions string `json:"sourcePartitions"`
+	Hibernate        int    `json:"hibernate"`
 
 	Nodes map[string]*PlanPIndexNode `json:"nodes"` // Keyed by NodeDef.UUID.
 }
@@ -251,6 +263,7 @@ type planPIndexBase struct {
 	SourceName       string `json:"sourceName,omitempty"`
 	SourceUUID       string `json:"sourceUUID,omitempty"`
 	SourcePartitions string `json:"sourcePartitions"`
+	Hibernate        int    `json:"hibernate"`
 
 	Nodes map[string]*PlanPIndexNode `json:"nodes"` // Keyed by NodeDef.UUID.
 }
@@ -564,9 +577,11 @@ func CfgSetPlanPIndexes(cfg Cfg, planPIndexes *PlanPIndexes, cas uint64) (
 // differences in UUID or ImplVersion.
 func SamePlanPIndexes(a, b *PlanPIndexes) bool {
 	if a == nil || b == nil {
+		log.Printf("one of them is nil...")
 		return a == nil && b == nil
 	}
 	if len(a.PlanPIndexes) != len(b.PlanPIndexes) {
+		log.Printf("sameplan: different lengths")
 		return false
 	}
 	return SubsetPlanPIndexes(a, b) && SubsetPlanPIndexes(b, a)
@@ -578,9 +593,11 @@ func SubsetPlanPIndexes(a, b *PlanPIndexes) bool {
 	for name, av := range a.PlanPIndexes {
 		bv, exists := b.PlanPIndexes[name]
 		if !exists {
+			log.Printf("sameplan: not exists")
 			return false
 		}
 		if !SamePlanPIndex(av, bv) {
+			log.Printf("sameplan: same plan pindex")
 			return false
 		}
 	}
@@ -600,6 +617,7 @@ func SamePlanPIndex(a, b *PlanPIndex) bool {
 		a.SourceUUID != b.SourceUUID ||
 		a.SourceParams != b.SourceParams ||
 		a.SourcePartitions != b.SourcePartitions ||
+		a.Hibernate != b.Hibernate ||
 		!reflect.DeepEqual(a.Nodes, b.Nodes) {
 		return false
 	}
