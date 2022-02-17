@@ -524,6 +524,9 @@ func CalcPlan(mode string, indexDefs *IndexDefs, nodeDefs *NodeDefs,
 		// plan for this index.
 		if CasePlanFrozen(indexDef, planPIndexesPrev, planPIndexes) {
 			log.Printf("Plan frozen for index: %s", indexDef.Name)
+			for _, pidx := range planPIndexes.PlanPIndexes {
+				log.Printf("planner: planpidx: %s, status: %d", pidx.Name, pidx.Hibernate)
+			}
 			continue
 		}
 
@@ -707,6 +710,7 @@ func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 			SourceParams:     indexDef.SourceParams,
 			SourcePartitions: sourcePartitions,
 			Nodes:            make(map[string]*PlanPIndexNode),
+			Hibernate:        indexDef.HibernateStatus,
 		}
 
 		if planPIndexesOut != nil {
@@ -1020,51 +1024,71 @@ func CasePlanFrozen(indexDef *IndexDef,
 
 func CasePlanHibernated(indexDef *IndexDef,
 	begPlanPIndexes, endPlanPIndexes *PlanPIndexes) bool {
+	if begPlanPIndexes != nil {
+		for _, pidx := range begPlanPIndexes.PlanPIndexes {
+			if pidx.IndexName == indexDef.Name {
+				log.Printf("planner: case plan hib: index: %s: pidx prev: %s, status: %d",
+					pidx.IndexName, pidx.Name, pidx.Hibernate)
+			}
+		}
+	}
+
 	if begPlanPIndexes != nil && endPlanPIndexes != nil {
 		for n, p := range begPlanPIndexes.PlanPIndexes {
-			if p.IndexName == indexDef.Name &&
-				(p.IndexUUID == indexDef.UUID ||
-					sameIndexDefsExceptUUID(indexDef,
-						getIndexDefFromPlanPIndexes([]*PlanPIndex{p}))) {
+			if p.IndexName == indexDef.Name {
 				temp := *p // for copy by val
+				if _, ok := endPlanPIndexes.PlanPIndexes[n]; !ok {
+					//log.Printf("planner: case plan hib: creating a new one")
+					temp2 := PlanPIndex{}
+					endPlanPIndexes.PlanPIndexes[n] = &temp2
+				}
 				endPlanPIndexes.PlanPIndexes[n] = &temp
 				if endPlanPIndexes.PlanPIndexes[n] == p {
 					log.Printf("two equal pointers in a copy by val...sigh...")
 				}
+				//log.Printf("planner: case plan hib: intermediate end plan pidxs: %d",
 				if indexDef.HibernateStatus == Cold {
 					for _, pidx := range endPlanPIndexes.PlanPIndexes {
-						log.Printf("planner: case plan hib: setting to cold")
-						pidx.Hibernate = Cold
-						for nodename := range pidx.Nodes {
-							pidx.Nodes[nodename].CanWrite = false
+						if pidx.IndexName == indexDef.Name {
+							pidx.Hibernate = Cold
+							for nodename := range pidx.Nodes {
+								pidx.Nodes[nodename].CanWrite = false
+							}
 						}
 					}
 				} else if indexDef.HibernateStatus == Warm {
 					for _, pidx := range endPlanPIndexes.PlanPIndexes {
-						pidx.Hibernate = Warm
-						for nodename := range pidx.Nodes {
-							pidx.Nodes[nodename].CanWrite = true
-						}
-					}
-				} else if indexDef.HibernateStatus == Hot {
-					for _, pidx := range endPlanPIndexes.PlanPIndexes {
-						pidx.Hibernate = Hot
-						for nodename := range pidx.Nodes {
-							pidx.Nodes[nodename].CanWrite = true
+						if pidx.IndexName == indexDef.Name {
+							pidx.Hibernate = Warm
+							for nodename := range pidx.Nodes {
+								pidx.Nodes[nodename].CanWrite = true
+							}
 						}
 					}
 				}
+				/*
+					else if indexDef.HibernateStatus == Hot {
+						for _, pidx := range endPlanPIndexes.PlanPIndexes {
+							if pidx.IndexName == indexDef.Name {
+								pidx.Hibernate = Hot
+								for nodename := range pidx.Nodes {
+									pidx.Nodes[nodename].CanWrite = true
+								}
+							}
+						}
+					}
+				*/
 			}
 		}
 	}
-	log.Printf("planner: length of end plan pindexes: %d", len(endPlanPIndexes.PlanPIndexes))
-	log.Printf("planner: endplan pindexes: %+v", endPlanPIndexes.PlanPIndexes)
+	if endPlanPIndexes != nil {
+		log.Printf("planner: length of end plan pindexes: %d", len(endPlanPIndexes.PlanPIndexes))
+		for _, pidx := range endPlanPIndexes.PlanPIndexes {
+			log.Printf("planner: index: %s: end plan pidx: %s, status: %d", pidx.IndexName,
+				pidx.Name, pidx.Hibernate)
+		}
+	}
 
-	// case plan hibernated - new func - similar - create new plan(copy by val) - l: 1040 - before caseplanfrozen.
-
-	// first copy by val
-	// next, change hibernate related vals in curr planpidxs
-	// should not copy in casePlanFrozen -so comment out the call
 	if indexDef.HibernateStatus != Cold {
 		return false
 	}
