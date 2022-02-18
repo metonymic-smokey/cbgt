@@ -335,31 +335,37 @@ func (mgr *Manager) pindexesRestart(
 	return errs
 }
 
-func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) error {
+func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) (*PIndex, error) {
 	// rename the pindex folder and name as per the new plan
 	newPath := mgr.PIndexPath(pi.planPIndexName)
 	if newPath != pi.pindex.Path {
-		_, err2 := os.Stat(newPath)
-		if err2 == nil {
-			// if already existing - renaming to an existing dir causes problems with updatePIndex()
-			return nil
-		}
+		/*
+			_, err2 := os.Stat(newPath)
+			if err2 == nil {
+				// if already existing - renaming to an existing dir causes problems with updatePIndex()
+				return nil, nil
+			}
+		*/
 		log.Printf("proceeding to rename %s to %s", pi.pindex.Path, newPath)
 		err := os.Rename(pi.pindex.Path, newPath)
 		if err != nil {
 			cleanDir(pi.pindex.Path)
 			cleanDir(newPath)
-			return fmt.Errorf("janitor: restartPIndex"+
+			return nil, fmt.Errorf("janitor: restartPIndex"+
 				" updating pindex: %s path: %s failed, err: %v",
 				pi.pindex.Name, newPath, err)
 		}
-		_, err2 = os.Stat(pi.pindex.Path)
+		_, err2 := os.Stat(pi.pindex.Path)
 		if err2 == nil { // old pindex dir still exists.
 			err := os.RemoveAll(pi.pindex.Path) // quick fix - deleting it.
 			if err != nil {
 				log.Printf("error deleting old pindex path")
-				return err
+				return nil, err
 			}
+		}
+		_, err2 = os.Stat(newPath)
+		if os.IsNotExist(err2) {
+			log.Printf("error renaming to %s", newPath)
 		}
 	}
 	pi2 := pi.pindex.Clone() //pi2 is the new pindex.
@@ -367,7 +373,6 @@ func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) error {
 	pi2.Name = pi.planPIndexName
 	log.Printf("new pindex name: %s", pi2.Name)
 	pi2.Path = newPath
-	//log.Printf("new pindex path: %s", pi2.Path)
 
 	_ = mgr.unregisterPIndex(pi.pindex.Name, pi.pindex)
 	// unreg the old pindex here, not in tempClose, since after this, this pidx won't be used anymore
@@ -379,7 +384,7 @@ func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) error {
 		buf, err := json.Marshal(pi2)
 		if err != nil {
 			cleanDir(newPath)
-			return fmt.Errorf("janitor: tempRestartPIndex"+
+			return nil, fmt.Errorf("janitor: tempRestartPIndex"+
 				" Marshal pindex: %s, err: %v", pi2.Name, err)
 
 		}
@@ -387,7 +392,7 @@ func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) error {
 			PINDEX_META_FILENAME, buf, 0600)
 		if err != nil {
 			cleanDir(pi2.Path)
-			return fmt.Errorf("janitor: tempRestartPIndex could not save "+
+			return nil, fmt.Errorf("janitor: tempRestartPIndex could not save "+
 				"PINDEX_META_FILENAME,"+" path: %s, err: %v", pi2.Path, err)
 		}
 	}
@@ -397,16 +402,36 @@ func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) error {
 	// a hot pidx is one that is queried freq and so it should be open
 	pindex, err := OpenPIndex(mgr, pi2.Path)
 	if err != nil {
-		cleanDir(pi2.Path) //- just a quick fix - not deleting dirs should ideally avoid that scorch error.
-		return fmt.Errorf("janitor: tempRestartPIndex could not open "+
+		log.Printf("error in opening path %s", pi2.Path)
+		cleanDir(pi.pindex.Path)
+		return nil, fmt.Errorf("janitor: tempRestartPIndex could not open "+
 			" pindex path: %s, err: %v", pi2.Path, err)
 	}
 	err = mgr.registerPIndex(pindex)
 	if err != nil {
+		log.Printf("error in registering pindex %s", pindex.Name)
 		cleanDir(pindex.Path)
-		return fmt.Errorf("janitor: tempRestartPIndex failed to "+
+		return nil, fmt.Errorf("janitor: tempRestartPIndex failed to "+
 			"register pindex: %s, err: %v", pindex.Name, err)
 	}
+	return pindex, nil
+}
+
+func (mgr *Manager) HibernatePIndex(pi *pindexRestartReq) error {
+	newPIndex, err := mgr.TempOpenPIndex(pi)
+	if err != nil {
+		return err
+	}
+	_ = newPIndex
+	/*
+		if newPIndex != nil {
+			log.Printf("janitor: hibernating pindex %s", newPIndex.Name)
+			err = mgr.TempClosePIndex(newPIndex)
+			if err != nil {
+				return err
+			}
+		}
+	*/
 	return nil
 }
 
@@ -457,13 +482,8 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	}
 	log.Printf("janitor: pindexes to add: %d", len(planPIndexesToAdd))
 	for _, ppi := range planPIndexesToAdd {
-		if _, ok := currPIndexes[ppi.Name]; ok {
-			log.Printf("  pindex: %v; UUID: %v", ppi.Name, ppi.IndexUUID)
-		} else {
-			log.Printf("janitor: plan pidx %s to be added but not registered", ppi.Name)
-			// delete from list - ripple bugs :(.
-			// planPIndexesToAdd = append(planPIndexesToAdd[:i], planPIndexesToAdd[i+1:]...)
-		}
+		log.Printf("  pindex: %v; UUID: %v", ppi.Name, ppi.IndexUUID)
+
 	}
 	log.Printf("janitor: pindexes to restart: %d", len(pindexesToRestart))
 	for _, pi := range pindexesToRestart {
@@ -480,7 +500,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 					log.Printf("janitor: error hibernating pindex %s: %e", pi.pindex.Name, err)
 				}
 			}
-			err = mgr.TempOpenPIndex(pi)
+			_, err = mgr.TempOpenPIndex(pi)
 			if err != nil {
 				log.Printf("janitor: error temp opening pindex: %e", err)
 			}
@@ -488,13 +508,12 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	}
 	log.Printf("janitor: pindexes to hibernate: %d", len(pindexesToHibernate))
 	for _, pi := range pindexesToHibernate {
-		log.Printf(" pindex: %v; UUID: %v", pi.Name, pi.IndexUUID)
-		err = mgr.TempClosePIndex(pi)
+		log.Printf(" pindex: %v; UUID: %v", pi.pindex.Name, pi.pindex.IndexUUID)
+		//err = mgr.HibernatePIndex(pi)
+		_, err = mgr.TempOpenPIndex(pi)
 		if err != nil {
-			log.Printf("janitor: error hibernating pindex %s: %e", pi.Name, err)
+			log.Printf("janitor: error temp opening pindex: %e", err)
 		}
-		//feedName := FeedNameForPIndex(pi, feedAllotment)
-		//log.Printf("feedname for pindex %s: %s", pi.Name, feedName)
 	}
 
 	// restart any of the pindexes so that they can
@@ -601,7 +620,7 @@ const (
 func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPIndex,
 	removePIndexes []*PIndex) (planPIndexesToAdd []*PlanPIndex,
 	pindexesToRemove []*PIndex, pindexesToRestart []*pindexRestartReq,
-	pindexesToHibernate []*PIndex, pindexesToActivate []*pindexRestartReq) {
+	pindexesToHibernate, pindexesToActivate []*pindexRestartReq) {
 	// if there are no pindexes to be removed as per planner,
 	// then there won't be anything to restart as well.
 	if len(removePIndexes) == 0 {
@@ -609,7 +628,7 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 	}
 	pindexesToRestart = make([]*pindexRestartReq, 0)
 	pindexesToRemove = make([]*PIndex, 0)
-	pindexesToHibernate = make([]*PIndex, 0)
+	pindexesToHibernate = make([]*pindexRestartReq, 0)
 	pindexesToActivate = make([]*pindexRestartReq, 0)
 	planPIndexesToAdd = make([]*PlanPIndex, 0)
 	// grouping addPlanPIndexes and removePIndexes as per index for
@@ -656,14 +675,8 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 				}
 				if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
 					log.Printf("janitor: phase change to cold...")
-					pindexesToActivate = append(pindexesToActivate,
+					pindexesToHibernate = append(pindexesToHibernate,
 						getPIndexesToRestart(pindexes, planPIndexes)...)
-					for _, planPidx := range planPIndexes {
-						pidx := mgr.GetPIndex(planPidx.Name)
-						if pidx != nil {
-							pindexesToHibernate = append(pindexesToHibernate, pidx)
-						}
-					}
 					continue
 				}
 				if phaseChange(configAnalyzeReq) == PHASE_CHANGE {
@@ -1104,7 +1117,6 @@ func CalcFeedsDelta(nodeUUID string, planPIndexes *PlanPIndexes,
 	}
 
 	for currFeedName, currFeed := range currFeeds {
-		log.Printf("currFeed name: %s", currFeedName)
 		if _, exists := groupedPIndexes[currFeedName]; !exists {
 			if !removedFeeds[currFeedName] {
 				removeFeeds = append(removeFeeds, currFeed)
