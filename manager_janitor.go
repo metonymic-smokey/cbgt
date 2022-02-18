@@ -444,7 +444,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 		log.Printf("janitor: add plan pidx: %s, status: %d", app.Name, app.Hibernate)
 	}
 	for _, pidx := range removePIndexes {
-		log.Printf("janitor: remove pindex: %s", pidx.Name)
+		log.Printf("janitor: remove pindex: %s, status: %d", pidx.Name, pidx.Hibernate)
 	}
 
 	// check for any pindexes for restart and get classified lists of
@@ -471,16 +471,6 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 			log.Printf("  pindex: %v; UUID: %v", pi.pindex.Name, pi.pindex.IndexUUID)
 		}
 	}
-	log.Printf("janitor: pindexes to hibernate: %d", len(pindexesToHibernate))
-	for _, pi := range pindexesToHibernate {
-		log.Printf(" pindex: %v; UUID: %v", pi.Name, pi.IndexUUID)
-		err = mgr.TempClosePIndex(pi)
-		if err != nil {
-			log.Printf("janitor: error hibernating pindex %s: %e", pi.Name, err)
-		}
-		//feedName := FeedNameForPIndex(pi, feedAllotment)
-		//log.Printf("feedname for pindex %s: %s", pi.Name, feedName)
-	}
 	log.Printf("janitor: pindexes to activate: %d", len(pindexesToActivate))
 	for _, pi := range pindexesToActivate {
 		if pi.pindex != nil {
@@ -495,6 +485,16 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 				log.Printf("janitor: error temp opening pindex: %e", err)
 			}
 		}
+	}
+	log.Printf("janitor: pindexes to hibernate: %d", len(pindexesToHibernate))
+	for _, pi := range pindexesToHibernate {
+		log.Printf(" pindex: %v; UUID: %v", pi.Name, pi.IndexUUID)
+		err = mgr.TempClosePIndex(pi)
+		if err != nil {
+			log.Printf("janitor: error hibernating pindex %s: %e", pi.Name, err)
+		}
+		//feedName := FeedNameForPIndex(pi, feedAllotment)
+		//log.Printf("feedname for pindex %s: %s", pi.Name, feedName)
 	}
 
 	// restart any of the pindexes so that they can
@@ -517,11 +517,6 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 
 	var currFeeds map[string]Feed
 	currFeeds, currPIndexes = mgr.CurrentMaps()
-	/*
-		for feedname, _ := range currFeeds {
-			log.Printf("feeds before calc feeds delta: %s", feedname)
-		}
-	*/
 	// printing pidxs of the manager and checking if old one is unregistered
 	_, currPidxs := mgr.CurrentMaps()
 	for _, currPidx := range currPidxs {
@@ -599,8 +594,8 @@ func filterFeedable(addFeeds [][]*PIndex) (rv [][]*PIndex) {
 }
 
 const (
-	HIBERNATE_PINDEX = "hibernatePIndex"
-	ACTIVATE_PINDEX  = "activatePIndex"
+	PHASE_CHANGE     = "phaseChange"
+	HIBERNATE_PINDEX = "hibernatePindex"
 )
 
 func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPIndex,
@@ -638,7 +633,6 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 		}
 	*/
 
-	var indexDefsMap map[string]*IndexDef
 	// take every pindex to remove and check the config change
 	// and sort out the pindexes to add, remove or restart
 	for indexName, pindexes := range indexPIndexMap {
@@ -656,21 +650,24 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 
 				pindexImplType, exists := PIndexImplTypes[pindex.IndexType]
 				if !exists || pindexImplType == nil {
-					log.Printf("new pindex...")
 					pindexesToRemove = append(pindexesToRemove, pindexes...)
 					planPIndexesToAdd = append(planPIndexesToAdd, planPIndexes...)
 					continue
 				}
 				if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
-					// if there is a hot to cold change, run tempClose on pindexes
-					log.Printf("janitor: phase change to cold")
-					pindexesToHibernate = append(pindexesToHibernate, pindexes...)
+					log.Printf("janitor: phase change to cold...")
+					pindexesToActivate = append(pindexesToActivate,
+						getPIndexesToRestart(pindexes, planPIndexes)...)
+					for _, planPidx := range planPIndexes {
+						pidx := mgr.GetPIndex(planPidx.Name)
+						if pidx != nil {
+							pindexesToHibernate = append(pindexesToHibernate, pidx)
+						}
+					}
 					continue
 				}
-				if phaseChange(configAnalyzeReq) == ACTIVATE_PINDEX {
-					// if there is a cold/warm to hot change,
-					//rename existing pidxs to match current plan
-					log.Printf("janitor: phase change to hot")
+				if phaseChange(configAnalyzeReq) == PHASE_CHANGE {
+					log.Printf("janitor: phase change but not to cold...")
 					pindexesToActivate = append(pindexesToActivate,
 						getPIndexesToRestart(pindexes, planPIndexes)...)
 					continue
@@ -684,29 +681,6 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 					pindexesToRemove = append(pindexesToRemove, pindexes...)
 					planPIndexesToAdd = append(planPIndexesToAdd, planPIndexes...)
 				}
-			} else { //if not part of the planned pindexes.
-				log.Printf("cold and warm indexes likely end up here...")
-				// on transition to warm/cold, pindexes end up here.
-				// hence, for pindexes of cold indexes need to be hibernated.
-				var err error
-				if indexDefsMap == nil {
-					_, indexDefsMap, err = mgr.GetIndexDefs(true)
-					if err != nil {
-						log.Printf("janitor: error getting index defs from mgr: %e", err)
-						continue
-					}
-				}
-
-				if idx, ok := indexDefsMap[indexName]; ok && idx.HibernateStatus == Cold {
-					//hibernating all pindexes of a cold index.
-					pindexesToHibernate = append(pindexesToHibernate, pindexes...)
-				} else if idx, ok := indexDefsMap[indexName]; ok && idx.HibernateStatus == Warm {
-					// log.Printf("Warm index: %s", indexName)
-					continue
-				} else {
-					//log.Printf("janitor: last resort...")
-					pindexesToRemove = append(pindexesToRemove, pindexes...)
-				}
 			}
 		}
 	}
@@ -715,12 +689,14 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 }
 
 func phaseChange(configAnalyzeReq *ConfigAnalyzeRequest) string {
-	if configAnalyzeReq.IndexDefnCur.HibernateStatus == Cold {
-		log.Printf("janitor: current phase: %d", configAnalyzeReq.IndexDefnCur.HibernateStatus)
+	if configAnalyzeReq.IndexDefnCur.HibernateStatus == Cold &&
+		configAnalyzeReq.IndexDefnPrev.HibernateStatus != Cold {
 		return HIBERNATE_PINDEX
 	}
-	if configAnalyzeReq.IndexDefnCur.HibernateStatus == Hot {
-		return ACTIVATE_PINDEX
+
+	if configAnalyzeReq.IndexDefnCur.HibernateStatus !=
+		configAnalyzeReq.IndexDefnPrev.HibernateStatus {
+		return PHASE_CHANGE
 	}
 	return ""
 }
@@ -775,11 +751,13 @@ func advPIndexClassifier(indexPIndexMap map[string][]*PIndex,
 						continue
 					}
 					if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
+						pindexesToActivate = append(pindexesToActivate,
+							newPIndexRestartReq(targetPlan, pindex))
 						pindexesToHibernate = append(pindexesToHibernate,
 							newPIndexRestartReq(targetPlan, pindex))
 						continue
 					}
-					if phaseChange(configAnalyzeReq) == ACTIVATE_PINDEX {
+					if phaseChange(configAnalyzeReq) == PHASE_CHANGE {
 						pindexesToActivate = append(pindexesToActivate,
 							newPIndexRestartReq(targetPlan, pindex))
 						continue

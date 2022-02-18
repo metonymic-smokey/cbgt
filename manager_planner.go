@@ -509,21 +509,13 @@ func CalcPlan(mode string, indexDefs *IndexDefs, nodeDefs *NodeDefs,
 		}
 		indexDef = pho.IndexDef
 
-		log.Printf("planner: initial length of planpindexesprev: %d", len(planPIndexesPrev.PlanPIndexes))
-		log.Printf("planner: initial length of planpindexes: %d", len(planPIndexes.PlanPIndexes))
+		/*
+			log.Printf("planner: initial length of planpindexesprev: %d", len(planPIndexesPrev.PlanPIndexes))
+			log.Printf("planner: initial length of planpindexes: %d", len(planPIndexes.PlanPIndexes))
+		*/
 
-		if CasePlanHibernated(indexDef, planPIndexesPrev, planPIndexes) {
-			log.Printf("planner: hibernated")
-			for _, pidx := range planPIndexes.PlanPIndexes {
-				log.Printf("planner: hibernated planpidx: %s, status: %d", pidx.Name, pidx.Hibernate)
-			}
-			continue
-		}
-
-		// If the plan is frozen, CasePlanFrozen clones the previous
-		// plan for this index.
-		if CasePlanFrozen(indexDef, planPIndexesPrev, planPIndexes) {
-			log.Printf("Plan frozen for index: %s", indexDef.Name)
+		if indexDef.HibernateStatus == Hot && CasePlanFrozen(indexDef, planPIndexesPrev, planPIndexes) {
+			log.Printf("Plan frozen for hot index: %s", indexDef.Name)
 			for _, pidx := range planPIndexes.PlanPIndexes {
 				log.Printf("planner: planpidx: %s, status: %d", pidx.Name, pidx.Hibernate)
 			}
@@ -681,6 +673,7 @@ func CalcNodesLayout(indexDefs *IndexDefs, nodeDefs *NodeDefs,
 func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 	options map[string]string, planPIndexesOut *PlanPIndexes) (
 	map[string]*PlanPIndex, error) {
+	log.Printf("planner: entering split index defs func...")
 	maxPartitionsPerPIndex := indexDef.PlanParams.MaxPartitionsPerPIndex
 
 	sourcePartitionsArr, err := DataSourcePartitions(indexDef.SourceType,
@@ -712,9 +705,15 @@ func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 			Nodes:            make(map[string]*PlanPIndexNode),
 			Hibernate:        indexDef.HibernateStatus,
 		}
+		// change plan params here - how to get planPIndexesPrev?!?!?
+		// do planPIndexesPrev and planPIndexes out refer to the same thing?
 
 		if planPIndexesOut != nil {
 			planPIndexesOut.PlanPIndexes[planPIndex.Name] = planPIndex
+			log.Printf("planner: split index defs: plan pidxs out for index %s", indexDef.Name)
+			for _, pidx := range planPIndexesOut.PlanPIndexes {
+				log.Printf("pidx: %s,status: %d", pidx.Name, pidx.Hibernate)
+			}
 		}
 
 		planPIndexesForIndex[planPIndex.Name] = planPIndex
@@ -733,6 +732,34 @@ func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 	if len(sourcePartitionsCurr) > 0 || // Assign any leftover partitions.
 		len(planPIndexesForIndex) <= 0 { // Assign at least 1 PlanPIndex.
 		addPlanPIndex(sourcePartitionsCurr)
+	}
+
+	if indexDef.HibernateStatus == Cold {
+		for _, pidx := range planPIndexesForIndex {
+			pidx.Hibernate = Cold
+			for nodename := range pidx.Nodes {
+				pidx.Nodes[nodename].CanWrite = false
+			}
+		}
+	} else if indexDef.HibernateStatus == Warm {
+		for _, pidx := range planPIndexesForIndex {
+			pidx.Hibernate = Warm
+			for nodename := range pidx.Nodes {
+				pidx.Nodes[nodename].CanWrite = true
+			}
+		}
+	} else if indexDef.HibernateStatus == Hot {
+		for _, pidx := range planPIndexesForIndex {
+			pidx.Hibernate = Hot
+			for nodename := range pidx.Nodes {
+				pidx.Nodes[nodename].CanWrite = true
+			}
+		}
+	}
+
+	log.Printf("planner: plan pindexes for index %s: ", indexDef.Name)
+	for _, pidx := range planPIndexesForIndex {
+		log.Printf("pidx: %s,status: %d", pidx.Name, pidx.Hibernate)
 	}
 
 	return planPIndexesForIndex, nil
@@ -1017,80 +1044,6 @@ func CasePlanFrozen(indexDef *IndexDef,
 				endPlanPIndexes.PlanPIndexes[n] = p
 			}
 		}
-	}
-
-	return true
-}
-
-func CasePlanHibernated(indexDef *IndexDef,
-	begPlanPIndexes, endPlanPIndexes *PlanPIndexes) bool {
-	if begPlanPIndexes != nil {
-		for _, pidx := range begPlanPIndexes.PlanPIndexes {
-			if pidx.IndexName == indexDef.Name {
-				log.Printf("planner: case plan hib: index: %s: pidx prev: %s, status: %d",
-					pidx.IndexName, pidx.Name, pidx.Hibernate)
-			}
-		}
-	}
-
-	if begPlanPIndexes != nil && endPlanPIndexes != nil {
-		for n, p := range begPlanPIndexes.PlanPIndexes {
-			if p.IndexName == indexDef.Name {
-				temp := *p // for copy by val
-				if _, ok := endPlanPIndexes.PlanPIndexes[n]; !ok {
-					//log.Printf("planner: case plan hib: creating a new one")
-					temp2 := PlanPIndex{}
-					endPlanPIndexes.PlanPIndexes[n] = &temp2
-				}
-				endPlanPIndexes.PlanPIndexes[n] = &temp
-				if endPlanPIndexes.PlanPIndexes[n] == p {
-					log.Printf("two equal pointers in a copy by val...sigh...")
-				}
-				//log.Printf("planner: case plan hib: intermediate end plan pidxs: %d",
-				if indexDef.HibernateStatus == Cold {
-					for _, pidx := range endPlanPIndexes.PlanPIndexes {
-						if pidx.IndexName == indexDef.Name {
-							pidx.Hibernate = Cold
-							for nodename := range pidx.Nodes {
-								pidx.Nodes[nodename].CanWrite = false
-							}
-						}
-					}
-				} else if indexDef.HibernateStatus == Warm {
-					for _, pidx := range endPlanPIndexes.PlanPIndexes {
-						if pidx.IndexName == indexDef.Name {
-							pidx.Hibernate = Warm
-							for nodename := range pidx.Nodes {
-								pidx.Nodes[nodename].CanWrite = true
-							}
-						}
-					}
-				}
-				/*
-					else if indexDef.HibernateStatus == Hot {
-						for _, pidx := range endPlanPIndexes.PlanPIndexes {
-							if pidx.IndexName == indexDef.Name {
-								pidx.Hibernate = Hot
-								for nodename := range pidx.Nodes {
-									pidx.Nodes[nodename].CanWrite = true
-								}
-							}
-						}
-					}
-				*/
-			}
-		}
-	}
-	if endPlanPIndexes != nil {
-		log.Printf("planner: length of end plan pindexes: %d", len(endPlanPIndexes.PlanPIndexes))
-		for _, pidx := range endPlanPIndexes.PlanPIndexes {
-			log.Printf("planner: index: %s: end plan pidx: %s, status: %d", pidx.IndexName,
-				pidx.Name, pidx.Hibernate)
-		}
-	}
-
-	if indexDef.HibernateStatus != Cold {
-		return false
 	}
 
 	return true
