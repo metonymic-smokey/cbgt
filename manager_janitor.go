@@ -336,16 +336,14 @@ func (mgr *Manager) pindexesRestart(
 }
 
 func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) (*PIndex, error) {
+	err := mgr.stopPIndex(pi.pindex, false)
+	if err != nil {
+		log.Printf("janitor: error closing pindex %s", pi.pindex.Name)
+		return nil, err
+	}
 	// rename the pindex folder and name as per the new plan
 	newPath := mgr.PIndexPath(pi.planPIndexName)
 	if newPath != pi.pindex.Path {
-		/*
-			_, err2 := os.Stat(newPath)
-			if err2 == nil {
-				// if already existing - renaming to an existing dir causes problems with updatePIndex()
-				return nil, nil
-			}
-		*/
 		log.Printf("proceeding to rename %s to %s", pi.pindex.Path, newPath)
 		err := os.Rename(pi.pindex.Path, newPath)
 		if err != nil {
@@ -423,15 +421,13 @@ func (mgr *Manager) HibernatePIndex(pi *pindexRestartReq) error {
 		return err
 	}
 	_ = newPIndex
-	/*
-		if newPIndex != nil {
-			log.Printf("janitor: hibernating pindex %s", newPIndex.Name)
-			err = mgr.TempClosePIndex(newPIndex)
-			if err != nil {
-				return err
-			}
+	if newPIndex != nil {
+		log.Printf("janitor: hibernating pindex %s", newPIndex.Name)
+		err = mgr.TempClosePIndex(newPIndex)
+		if err != nil {
+			return err
 		}
-	*/
+	}
 	return nil
 }
 
@@ -461,16 +457,6 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	mapWantedPlanPIndex := mgr.reusablePIndexesPlanMap(currPIndexes, planPIndexes)
 	addPlanPIndexes, removePIndexes :=
 		CalcPIndexesDelta(mgr.uuid, currPIndexes, planPIndexes, mapWantedPlanPIndex)
-	log.Printf("janitor: length of add plan pidxs: %d", len(addPlanPIndexes))
-	for _, pidx := range planPIndexes.PlanPIndexes {
-		log.Printf("janitor: plan pindexes name: %s", pidx.Name)
-	}
-	for _, app := range addPlanPIndexes {
-		log.Printf("janitor: add plan pidx: %s, status: %d", app.Name, app.Hibernate)
-	}
-	for _, pidx := range removePIndexes {
-		log.Printf("janitor: remove pindex: %s, status: %d", pidx.Name, pidx.Hibernate)
-	}
 
 	// check for any pindexes for restart and get classified lists of
 	// pindexes to add, remove and restart
@@ -483,7 +469,6 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	log.Printf("janitor: pindexes to add: %d", len(planPIndexesToAdd))
 	for _, ppi := range planPIndexesToAdd {
 		log.Printf("  pindex: %v; UUID: %v", ppi.Name, ppi.IndexUUID)
-
 	}
 	log.Printf("janitor: pindexes to restart: %d", len(pindexesToRestart))
 	for _, pi := range pindexesToRestart {
@@ -509,8 +494,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	log.Printf("janitor: pindexes to hibernate: %d", len(pindexesToHibernate))
 	for _, pi := range pindexesToHibernate {
 		log.Printf(" pindex: %v; UUID: %v", pi.pindex.Name, pi.pindex.IndexUUID)
-		//err = mgr.HibernatePIndex(pi)
-		_, err = mgr.TempOpenPIndex(pi)
+		err = mgr.HibernatePIndex(pi)
 		if err != nil {
 			log.Printf("janitor: error temp opening pindex: %e", err)
 		}
@@ -538,9 +522,6 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	currFeeds, currPIndexes = mgr.CurrentMaps()
 	// printing pidxs of the manager and checking if old one is unregistered
 	_, currPidxs := mgr.CurrentMaps()
-	for _, currPidx := range currPidxs {
-		log.Printf("curr pidx name: %s", currPidx.Name)
-	}
 
 	addFeeds, removeFeeds :=
 		CalcFeedsDelta(mgr.uuid, planPIndexes, currFeeds, currPIndexes,
