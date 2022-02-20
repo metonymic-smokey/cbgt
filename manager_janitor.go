@@ -521,7 +521,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	var currFeeds map[string]Feed
 	currFeeds, currPIndexes = mgr.CurrentMaps()
 	// printing pidxs of the manager and checking if old one is unregistered
-	_, currPidxs := mgr.CurrentMaps()
+	// _, currPidxs := mgr.CurrentMaps()
 
 	addFeeds, removeFeeds :=
 		CalcFeedsDelta(mgr.uuid, planPIndexes, currFeeds, currPIndexes,
@@ -626,12 +626,10 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 
 	// avoid pindex rebuild on replica updates on index defn
 	// unless overridden
-	/*
-		if v, ok := mgr.Options()["rebuildOnReplicaUpdate"]; !ok ||
-			v != "true" {
-			return advPIndexClassifier(indexPIndexMap, indexPlanPIndexMap)
-		}
-	*/
+	if v, ok := mgr.Options()["rebuildOnReplicaUpdate"]; !ok ||
+		v != "true" {
+		return advPIndexClassifier(indexPIndexMap, indexPlanPIndexMap)
+	}
 
 	// take every pindex to remove and check the config change
 	// and sort out the pindexes to add, remove or restart
@@ -745,26 +743,26 @@ func advPIndexClassifier(indexPIndexMap map[string][]*PIndex,
 						continue
 					}
 					if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
-						pindexesToActivate = append(pindexesToActivate,
-							newPIndexRestartReq(targetPlan, pindex))
+						log.Printf("janitor: phase change to cold")
 						pindexesToHibernate = append(pindexesToHibernate,
 							newPIndexRestartReq(targetPlan, pindex))
+						restartable[targetPlan.Name] = struct{}{}
 						continue
 					}
 					if phaseChange(configAnalyzeReq) == PHASE_CHANGE {
+						log.Printf("janitor: phase change but not to cold")
 						pindexesToActivate = append(pindexesToActivate,
 							newPIndexRestartReq(targetPlan, pindex))
+						restartable[targetPlan.Name] = struct{}{}
 						continue
-					}
-					// restartable pindex found from plan
-					if pindexImplType.AnalyzeIndexDefUpdates != nil &&
+					} else if pindexImplType.AnalyzeIndexDefUpdates != nil &&
 						pindexImplType.AnalyzeIndexDefUpdates(configAnalyzeReq) ==
 							PINDEXES_RESTART {
 						pindexesToRestart = append(pindexesToRestart,
 							newPIndexRestartReq(targetPlan, pindex))
 						restartable[targetPlan.Name] = struct{}{}
 						continue
-					}
+					} // restartable pindex found from plan
 					// upon no restartability, consider the pindex for removal
 					pindexesToRemove = append(pindexesToRemove, pindex)
 				}
