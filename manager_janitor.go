@@ -1012,18 +1012,6 @@ func CalcPIndexesDelta(mgrUUID string,
 				removePIndexes = append(removePIndexes, currPIndex)
 				mapRemovePIndex[currPIndex.Name] = currPIndex
 			}
-		} else {
-			// exists in wantedPlanPIndex and hence, 'wanted' - will never be included for removal.
-			// but needs to be hibernated later, not removed like the others.
-			// hibernated instead of removed in classifyAddRemoveRestartPIndexes func.
-			// cannot change reuablePlanPIndexesMap function since that filters for reloadable pindexes
-			// i.e. still involved in an ongoing plan
-			// Pindexes to be hibernated are frozen i.e. not involved in any plan since no further plan change
-			// hence, these have to be filtered out here.
-			if planPidx := mapWantedPlanPIndex[currPIndex.Name]; planPidx.Hibernate == Cold {
-				//log.Printf("janitor: exists in current plan, but should be hibernated")
-				removePIndexes = append(removePIndexes, currPIndex)
-			}
 		}
 	}
 
