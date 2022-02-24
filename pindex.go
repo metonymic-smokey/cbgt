@@ -151,6 +151,7 @@ func NewPIndex(mgr *Manager, name, uuid,
 	indexType, indexName, indexUUID, indexParams,
 	sourceType, sourceName, sourceUUID, sourceParams, sourcePartitions string,
 	path string, hibernationStatus int) (*PIndex, error) {
+	log.Printf("pindex: in NewPIndex for index %s", indexName)
 	var pindex *PIndex
 
 	restart := func() {
@@ -187,9 +188,6 @@ func NewPIndex(mgr *Manager, name, uuid,
 		Path:             path,
 		Impl:             impl,
 		Dest:             dest,
-		// need to add Hibernate here, just a dummy
-		//Hibernate: hibernationStatus,
-		// Hibernate: Cold,
 	}
 	pindex.sourcePartitionsMap = map[string]bool{}
 	for _, partition := range strings.Split(sourcePartitions, ",") {
@@ -321,6 +319,7 @@ type CoveringPIndexes struct {
 	LocalPIndexes      []*PIndex
 	RemotePlanPIndexes []*RemotePlanPIndex
 	MissingPIndexNames []string
+	HibernatedPIndexes []*PIndex
 }
 
 // PlanPIndexFilters represent registered PlanPIndexFilter func's, and
@@ -359,7 +358,7 @@ func (mgr *Manager) CoveringPIndexes(indexName, indexUUID string,
 	err error) {
 	var missingPIndexNames []string
 
-	localPIndexes, remotePlanPIndexes, missingPIndexNames, err =
+	localPIndexes, remotePlanPIndexes, missingPIndexNames, _, err =
 		mgr.CoveringPIndexesEx(CoveringPIndexesSpec{
 			IndexName: indexName,
 			IndexUUID: indexUUID,
@@ -382,6 +381,7 @@ func (mgr *Manager) CoveringPIndexesBestEffort(indexName, indexUUID string,
 	localPIndexes []*PIndex,
 	remotePlanPIndexes []*RemotePlanPIndex,
 	missingPIndexNames []string,
+	hibernatedPIndexes []*PIndex,
 	err error) {
 	return mgr.CoveringPIndexesEx(CoveringPIndexesSpec{
 		IndexName: indexName,
@@ -397,7 +397,7 @@ func (mgr *Manager) CoveringPIndexesBestEffort(indexName, indexUUID string,
 // spec.PlanPIndexFilterName is used.
 func (mgr *Manager) CoveringPIndexesEx(spec CoveringPIndexesSpec,
 	planPIndexFilter PlanPIndexFilter, noCache bool) (
-	[]*PIndex, []*RemotePlanPIndex, []string, error) {
+	[]*PIndex, []*RemotePlanPIndex, []string, []*PIndex, error) {
 	ppf := planPIndexFilter
 	if ppf == nil {
 		if !noCache {
@@ -410,17 +410,18 @@ func (mgr *Manager) CoveringPIndexesEx(spec CoveringPIndexesSpec,
 			mgr.m.RUnlock()
 
 			if cp != nil {
-				return cp.LocalPIndexes, cp.RemotePlanPIndexes, cp.MissingPIndexNames, nil
+				return cp.LocalPIndexes, cp.RemotePlanPIndexes, cp.MissingPIndexNames,
+					cp.HibernatedPIndexes, nil
 			}
 		}
 
 		ppf = PlanPIndexFilters[spec.PlanPIndexFilterName]
 	}
 
-	localPIndexes, remotePlanPIndexes, missingPIndexNames, err :=
+	localPIndexes, remotePlanPIndexes, missingPIndexNames, hibernatedPIndexes, err :=
 		mgr.coveringPIndexesEx(spec.IndexName, spec.IndexUUID, ppf)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	if planPIndexFilter == nil && !noCache {
@@ -428,6 +429,7 @@ func (mgr *Manager) CoveringPIndexesEx(spec CoveringPIndexesSpec,
 			LocalPIndexes:      localPIndexes,
 			RemotePlanPIndexes: remotePlanPIndexes,
 			MissingPIndexNames: missingPIndexNames,
+			HibernatedPIndexes: hibernatedPIndexes,
 		}
 
 		mgr.m.Lock()
@@ -438,7 +440,8 @@ func (mgr *Manager) CoveringPIndexesEx(spec CoveringPIndexesSpec,
 		mgr.m.Unlock()
 	}
 
-	return localPIndexes, remotePlanPIndexes, missingPIndexNames, err
+	return localPIndexes, remotePlanPIndexes, missingPIndexNames,
+		hibernatedPIndexes, err
 }
 
 func (mgr *Manager) coveringPIndexesEx(indexName, indexUUID string,
@@ -446,24 +449,25 @@ func (mgr *Manager) coveringPIndexesEx(indexName, indexUUID string,
 	localPIndexes []*PIndex,
 	remotePlanPIndexes []*RemotePlanPIndex,
 	missingPIndexNames []string,
+	hibernatedPIndexes []*PIndex,
 	err error) {
 	nodeDefs, err := mgr.GetNodeDefs(NODE_DEFS_WANTED, false)
 	if err != nil {
-		return nil, nil, nil,
+		return nil, nil, nil, nil,
 			fmt.Errorf("pindex: could not get wanted nodeDefs,"+
 				" err: %v", err)
 	}
 
 	_, allPlanPIndexes, err := mgr.GetPlanPIndexes(false)
 	if err != nil {
-		return nil, nil, nil,
+		return nil, nil, nil, nil,
 			fmt.Errorf("pindex: could not retrieve allPlanPIndexes,"+
 				" err: %v", err)
 	}
 
 	planPIndexes, exists := allPlanPIndexes[indexName]
 	if !exists || len(planPIndexes) <= 0 {
-		return nil, nil, nil,
+		return nil, nil, nil, nil,
 			fmt.Errorf("pindex: no planPIndexes for indexName: %s",
 				indexName)
 	}
@@ -476,7 +480,8 @@ func (mgr *Manager) ClassifyPIndexes(indexName, indexUUID string,
 	planPIndexes []*PlanPIndex, nodeDefs *NodeDefs,
 	planPIndexFilter PlanPIndexFilter) (
 	localPIndexes []*PIndex, remotePlanPIndexes []*RemotePlanPIndex,
-	missingPIndexNames []string, err error) {
+	missingPIndexNames []string, hibernatedPIndexes []*PIndex, err error) {
+	// log.Printf("pindex: in classifying pindex...")
 	// Returns true if the node has the "pindex" tag.
 	nodeDoesPIndexes := func(nodeUUID string) (*NodeDef, bool) {
 		nodeDef, ok := nodeDefs.NodeDefs[nodeUUID]
@@ -496,7 +501,13 @@ func (mgr *Manager) ClassifyPIndexes(indexName, indexUUID string,
 	localPIndexes = make([]*PIndex, 0, len(planPIndexes))
 	remotePlanPIndexes = make([]*RemotePlanPIndex, 0, len(planPIndexes))
 	missingPIndexNames = make([]string, 0)
-	// if hibernated index, should be a separate list cold indexes
+	// if it is hibernated, return a separate list
+	hibernatedPIndexes = make([]*PIndex, 0)
+	_, indexDefsMap, err := mgr.GetIndexDefs(true)
+	if err != nil {
+		return localPIndexes, remotePlanPIndexes, missingPIndexNames,
+			hibernatedPIndexes, err
+	}
 
 	_, pindexes := mgr.CurrentMaps()
 
@@ -548,7 +559,18 @@ func (mgr *Manager) ClassifyPIndexes(indexName, indexUUID string,
 		} else if lowestNode.UUID == selfUUID {
 			// lowest priority is local
 			localPIndex := pindexes[planPIndex.Name]
-			localPIndexes = append(localPIndexes, localPIndex)
+			// localPIndexes = append(localPIndexes, localPIndex)
+			// classify hibernated pindexes here
+			if indexDefsMap[localPIndex.IndexName].HibernateStatus == Cold {
+				hibernatedPIndexes = append(hibernatedPIndexes, localPIndex)
+				for nodename := range planPIndex.Nodes {
+					planPIndex.Nodes[nodename].CanWrite = true
+				}
+			} else {
+				localPIndexes = append(localPIndexes, localPIndex)
+				// hib pindexes and local pindexes have to be disjoint
+				// since the search actions invoked for them are separate
+			}
 		} else {
 			// lowest priority is remote
 			remotePlanPIndexes =
@@ -559,7 +581,8 @@ func (mgr *Manager) ClassifyPIndexes(indexName, indexUUID string,
 		}
 	}
 
-	return localPIndexes, remotePlanPIndexes, missingPIndexNames, nil
+	return localPIndexes, remotePlanPIndexes, missingPIndexNames,
+		hibernatedPIndexes, nil
 }
 
 // coveringCacheVerLOCKED computes a CAS-like number that can be
