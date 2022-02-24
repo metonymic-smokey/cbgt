@@ -47,8 +47,6 @@ type PIndex struct {
 
 	m      sync.Mutex
 	closed bool
-
-	Hibernate int `json:"hibernate"`
 }
 
 // Note that these callbacks are invoked within the manager's sync mutex
@@ -121,7 +119,6 @@ func (p *PIndex) Clone() *PIndex {
 			Impl:                p.Impl,
 			Dest:                p.Dest,
 			closed:              p.closed,
-			Hibernate:           p.Hibernate,
 		}
 		p.m.Unlock()
 		return pi
@@ -150,8 +147,7 @@ func restartPIndex(mgr *Manager, pindex *PIndex) {
 func NewPIndex(mgr *Manager, name, uuid,
 	indexType, indexName, indexUUID, indexParams,
 	sourceType, sourceName, sourceUUID, sourceParams, sourcePartitions string,
-	path string, hibernationStatus int) (*PIndex, error) {
-	log.Printf("pindex: in NewPIndex for index %s", indexName)
+	path string) (*PIndex, error) {
 	var pindex *PIndex
 
 	restart := func() {

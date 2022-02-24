@@ -335,7 +335,7 @@ func (mgr *Manager) pindexesRestart(
 	return errs
 }
 
-func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) (*PIndex, error) {
+func (mgr *Manager) activatePIndex(pi *pindexRestartReq) (*PIndex, error) {
 	err := mgr.stopPIndex(pi.pindex, false)
 	if err != nil {
 		log.Printf("janitor: error closing pindex %s", pi.pindex.Name)
@@ -367,14 +367,12 @@ func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) (*PIndex, error) {
 		}
 	}
 	pi2 := pi.pindex.Clone() //pi2 is the new pindex.
-	log.Printf("old pindex name: %s", pi2.Name)
 	pi2.Name = pi.planPIndexName
-	log.Printf("new pindex name: %s", pi2.Name)
 	pi2.Path = newPath
 
 	_ = mgr.unregisterPIndex(pi.pindex.Name, pi.pindex)
-	// unreg the old pindex here, not in tempClose, since after this, this pidx won't be used anymore
-	// in cold, it might need to be used again, so just tempClose not unreg.
+	// unreg the old pindex here, not in hibernatePIndexUtil, since after this, this pidx won't be used anymore
+	// in cold, it might need to be used again, so just hibernatePIndexUtil, not unreg.
 
 	// persist PINDEX_META only if manager's dataDir is set
 	if len(mgr.dataDir) > 0 {
@@ -415,20 +413,24 @@ func (mgr *Manager) TempOpenPIndex(pi *pindexRestartReq) (*PIndex, error) {
 	return pindex, nil
 }
 
-func (mgr *Manager) HibernatePIndex(pi *pindexRestartReq) error {
-	newPIndex, err := mgr.TempOpenPIndex(pi)
+func (mgr *Manager) hibernatePIndex(pi *pindexRestartReq) error {
+	newPIndex, err := mgr.activatePIndex(pi)
 	if err != nil {
 		return err
 	}
-	_ = newPIndex
 	if newPIndex != nil {
 		log.Printf("janitor: hibernating pindex %s", newPIndex.Name)
-		err = mgr.TempClosePIndex(newPIndex)
+		err = mgr.hibernatePIndexUtil(newPIndex)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func NewPIndexRestartReq(pindex *PIndex,
+	planPIndex *PlanPIndex) *pindexRestartReq {
+	return newPIndexRestartReq(planPIndex, pindex)
 }
 
 // JanitorOnce is the main body of a JanitorLoop.
@@ -480,12 +482,12 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	for _, pi := range pindexesToActivate {
 		if pi.pindex != nil {
 			if !pi.pindex.closed { // in case, closing when cold was interrupted/didn't happen
-				err = mgr.TempClosePIndex(pi.pindex)
+				err = mgr.hibernatePIndexUtil(pi.pindex)
 				if err != nil {
 					log.Printf("janitor: error hibernating pindex %s: %e", pi.pindex.Name, err)
 				}
 			}
-			_, err = mgr.TempOpenPIndex(pi)
+			_, err = mgr.activatePIndex(pi)
 			if err != nil {
 				log.Printf("janitor: error temp opening pindex: %e", err)
 			}
@@ -494,7 +496,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	log.Printf("janitor: pindexes to hibernate: %d", len(pindexesToHibernate))
 	for _, pi := range pindexesToHibernate {
 		log.Printf(" pindex: %v; UUID: %v", pi.pindex.Name, pi.pindex.IndexUUID)
-		err = mgr.HibernatePIndex(pi)
+		err = mgr.hibernatePIndex(pi)
 		if err != nil {
 			log.Printf("janitor: error temp opening pindex: %e", err)
 		}
@@ -520,8 +522,6 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 
 	var currFeeds map[string]Feed
 	currFeeds, currPIndexes = mgr.CurrentMaps()
-	// printing pidxs of the manager and checking if old one is unregistered
-	// _, currPidxs := mgr.CurrentMaps()
 
 	addFeeds, removeFeeds :=
 		CalcFeedsDelta(mgr.uuid, planPIndexes, currFeeds, currPIndexes,
@@ -653,13 +653,11 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 					continue
 				}
 				if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
-					log.Printf("janitor: phase change to cold...")
 					pindexesToHibernate = append(pindexesToHibernate,
 						getPIndexesToRestart(pindexes, planPIndexes)...)
 					continue
 				}
 				if phaseChange(configAnalyzeReq) == PHASE_CHANGE {
-					log.Printf("janitor: phase change but not to cold...")
 					pindexesToActivate = append(pindexesToActivate,
 						getPIndexesToRestart(pindexes, planPIndexes)...)
 					continue
@@ -743,14 +741,12 @@ func advPIndexClassifier(indexPIndexMap map[string][]*PIndex,
 						continue
 					}
 					if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
-						log.Printf("janitor: phase change to cold")
 						pindexesToHibernate = append(pindexesToHibernate,
 							newPIndexRestartReq(targetPlan, pindex))
 						restartable[targetPlan.Name] = struct{}{}
 						continue
 					}
 					if phaseChange(configAnalyzeReq) == PHASE_CHANGE {
-						log.Printf("janitor: phase change but not to cold")
 						pindexesToActivate = append(pindexesToActivate,
 							newPIndexRestartReq(targetPlan, pindex))
 						restartable[targetPlan.Name] = struct{}{}
@@ -1033,7 +1029,6 @@ func CalcFeedsDelta(nodeUUID string, planPIndexes *PlanPIndexes,
 	// but a single feed may be emitting to multiple pindexes.
 	groupedPIndexes := make(map[string][]*PIndex)
 	for _, pindex := range pindexes {
-		// log.Printf("feed for pindex %s", pindex.Name)
 		planPIndex, exists := planPIndexes.PlanPIndexes[pindex.Name]
 		if exists && planPIndex != nil &&
 			PlanPIndexNodeCanWrite(planPIndex.Nodes[nodeUUID]) {
@@ -1047,10 +1042,6 @@ func CalcFeedsDelta(nodeUUID string, planPIndexes *PlanPIndexes,
 	removedFeeds := map[string]bool{}
 
 	for feedName, feedPIndexes := range groupedPIndexes {
-		log.Printf("feed name: %s")
-		for _, fp := range feedPIndexes {
-			log.Printf("feed partition name: ", fp.Name)
-		}
 		currFeed, currFeedExists := currFeeds[feedName]
 		if !currFeedExists {
 			addFeeds = append(addFeeds, feedPIndexes)
@@ -1182,7 +1173,6 @@ func (mgr *Manager) startPIndex(planPIndex *PlanPIndex) error {
 	}
 
 	if pindex == nil {
-		log.Printf("janitor: creating a new pindex")
 		pindex, err = NewPIndex(mgr, planPIndex.Name, NewUUID(),
 			planPIndex.IndexType,
 			planPIndex.IndexName,
@@ -1193,8 +1183,7 @@ func (mgr *Manager) startPIndex(planPIndex *PlanPIndex) error {
 			planPIndex.SourceUUID,
 			planPIndex.SourceParams,
 			planPIndex.SourcePartitions,
-			path,
-			planPIndex.Hibernate)
+			path)
 		if err != nil {
 			return fmt.Errorf("janitor: NewPIndex, name: %s, err: %v",
 				planPIndex.Name, err)

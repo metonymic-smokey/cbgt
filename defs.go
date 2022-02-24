@@ -18,7 +18,6 @@ import (
 	"sync"
 
 	"github.com/couchbase/blance"
-	log "github.com/couchbase/clog"
 )
 
 const (
@@ -128,8 +127,6 @@ type PlanParams struct {
 	// there was no previous plan.  Defaults to false (allow
 	// re-planning).
 	PlanFrozen bool `json:"planFrozen,omitempty"`
-
-	ClosePIndexes bool `json:"closePIndexes,omitempty"` // add omitempty after testing phase
 }
 
 // A NodePlanParam defines whether a particular node can service a
@@ -577,11 +574,9 @@ func CfgSetPlanPIndexes(cfg Cfg, planPIndexes *PlanPIndexes, cas uint64) (
 // differences in UUID or ImplVersion.
 func SamePlanPIndexes(a, b *PlanPIndexes) bool {
 	if a == nil || b == nil {
-		log.Printf("one of them is nil...")
 		return a == nil && b == nil
 	}
 	if len(a.PlanPIndexes) != len(b.PlanPIndexes) {
-		log.Printf("sameplan: different lengths")
 		return false
 	}
 	return SubsetPlanPIndexes(a, b) && SubsetPlanPIndexes(b, a)
@@ -593,11 +588,9 @@ func SubsetPlanPIndexes(a, b *PlanPIndexes) bool {
 	for name, av := range a.PlanPIndexes {
 		bv, exists := b.PlanPIndexes[name]
 		if !exists {
-			log.Printf("sameplan: not exists")
 			return false
 		}
 		if !SamePlanPIndex(av, bv) {
-			log.Printf("sameplan: same plan pindex")
 			return false
 		}
 	}

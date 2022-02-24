@@ -84,7 +84,7 @@ func NoopPlannerHook(x PlannerHookInfo) (PlannerHookInfo, bool, error) {
 }
 
 // stops a pindex without unregistering or removing files from disk
-func (mgr *Manager) TempClosePIndex(pindex *PIndex) error {
+func (mgr *Manager) hibernatePIndexUtil(pindex *PIndex) error {
 	// First, stop any feeds that might be sending to the pindex's dest.
 	log.Printf("temporarily closed pindex %s", pindex.Name)
 	feeds, _ := mgr.CurrentMaps()
@@ -102,7 +102,7 @@ func (mgr *Manager) TempClosePIndex(pindex *PIndex) error {
 	if pindex.Dest != nil {
 		buf := bytes.NewBuffer(nil)
 		buf.Write([]byte(fmt.Sprintf(
-			`{"event":"tempClosePIndex","name":"%s","time":"%s","stats":`,
+			`{"event":"hibernatePIndexUtil","name":"%s","time":"%s","stats":`,
 			pindex.Name, time.Now().Format(time.RFC3339Nano))))
 		err := pindex.Dest.Stats(buf)
 		if err == nil {
@@ -161,7 +161,6 @@ func (mgr *Manager) PlannerLoop() {
 				case e := <-ec:
 					atomic.AddUint64(&mgr.stats.TotPlannerSubscriptionEvent, 1)
 					mgr.PlannerKick("cfg changed, key: " + e.Key)
-					log.Printf("so there is some change in cfg, hence planner channel is hit...")
 				}
 			}
 		}()
@@ -257,20 +256,8 @@ func Plan(cfg Cfg, version, uuid, server string, options map[string]string,
 		return false, fmt.Errorf("planner: CalcPlan, err: %v", err)
 	}
 
-	// should be set to the correct hib status here - set in calc plan
-	log.Printf("status after calc plan...")
-	for _, pidx := range planPIndexesPrev.PlanPIndexes {
-		log.Printf("plan pindexes prev %s: status %d", pidx.Name, pidx.Hibernate)
-	} // should be diff from planpindexes since that's changed in the func
-	for _, pidx := range planPIndexes.PlanPIndexes {
-		log.Printf("plan pindexes %s: status %d", pidx.Name, pidx.Hibernate)
-	}
-
 	if SamePlanPIndexes(planPIndexes, planPIndexesPrev) {
-		log.Printf("same plan")
 		return false, nil
-	} else {
-		log.Printf("not same plan")
 	}
 
 	_, err = CfgSetPlanPIndexes(cfg, planPIndexes, cas)
@@ -509,16 +496,8 @@ func CalcPlan(mode string, indexDefs *IndexDefs, nodeDefs *NodeDefs,
 		}
 		indexDef = pho.IndexDef
 
-		/*
-			log.Printf("planner: initial length of planpindexesprev: %d", len(planPIndexesPrev.PlanPIndexes))
-			log.Printf("planner: initial length of planpindexes: %d", len(planPIndexes.PlanPIndexes))
-		*/
-
 		if indexDef.HibernateStatus == Hot && CasePlanFrozen(indexDef, planPIndexesPrev, planPIndexes) {
 			log.Printf("Plan frozen for hot index: %s", indexDef.Name)
-			for _, pidx := range planPIndexes.PlanPIndexes {
-				log.Printf("planner: planpidx: %s, status: %d", pidx.Name, pidx.Hibernate)
-			}
 			continue
 		}
 
@@ -593,7 +572,6 @@ func CalcPlan(mode string, indexDefs *IndexDefs, nodeDefs *NodeDefs,
 
 	_, _, err = plannerHookCall("end", nil, nil)
 
-	log.Printf("planner: length of planpindexes: %d", len(planPIndexes.PlanPIndexes))
 	return planPIndexes, err
 }
 
@@ -673,7 +651,6 @@ func CalcNodesLayout(indexDefs *IndexDefs, nodeDefs *NodeDefs,
 func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 	options map[string]string, planPIndexesOut *PlanPIndexes) (
 	map[string]*PlanPIndex, error) {
-	log.Printf("planner: entering split index defs func...")
 	maxPartitionsPerPIndex := indexDef.PlanParams.MaxPartitionsPerPIndex
 
 	sourcePartitionsArr, err := DataSourcePartitions(indexDef.SourceType,
@@ -705,15 +682,9 @@ func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 			Nodes:            make(map[string]*PlanPIndexNode),
 			Hibernate:        indexDef.HibernateStatus,
 		}
-		// change plan params here - how to get planPIndexesPrev?!?!?
-		// do planPIndexesPrev and planPIndexes out refer to the same thing?
 
 		if planPIndexesOut != nil {
 			planPIndexesOut.PlanPIndexes[planPIndex.Name] = planPIndex
-			log.Printf("planner: split index defs: plan pidxs out for index %s", indexDef.Name)
-			for _, pidx := range planPIndexesOut.PlanPIndexes {
-				log.Printf("pidx: %s,status: %d", pidx.Name, pidx.Hibernate)
-			}
 		}
 
 		planPIndexesForIndex[planPIndex.Name] = planPIndex
@@ -755,11 +726,6 @@ func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 				pidx.Nodes[nodename].CanWrite = true
 			}
 		}
-	}
-
-	log.Printf("planner: plan pindexes for index %s: ", indexDef.Name)
-	for _, pidx := range planPIndexesForIndex {
-		log.Printf("pidx: %s,status: %d", pidx.Name, pidx.Hibernate)
 	}
 
 	return planPIndexesForIndex, nil
