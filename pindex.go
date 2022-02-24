@@ -274,6 +274,11 @@ func PIndexNameFromPath(path string) string {
 	return path[0 : len(path)-len(pindexPathSuffix)]
 }
 
+// Returns an index name from a pindex name.
+func IndexNameFromPIndexName(pindex string) string {
+	return strings.Split(pindex, "_")[0]
+}
+
 // Retrieves a pindex name from a pindex path.
 func ParsePIndexPath(dataDir, pindexPath string) (string, bool) {
 	if !strings.HasSuffix(pindexPath, pindexPathSuffix) {

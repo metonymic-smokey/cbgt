@@ -541,6 +541,44 @@ type pindexLoadReq struct {
 	path, pindexName string
 }
 
+// Opens a pindex if the parent index is Hot or Warm.
+func (mgr *Manager) OpenPIndexBasedOnStatus(pindexPath string) (*PIndex, error) {
+	_, indexDefsMap, err := mgr.GetIndexDefs(false)
+	if err != nil {
+		return nil, fmt.Errorf("manager: error getting index defs: %s",
+			err.Error())
+	}
+
+	pindex := &PIndex{Path: pindexPath}
+	pindexName := PIndexNameFromPath(pindexPath)
+	indexName := IndexNameFromPIndexName(pindexName)
+	if idx, ok := indexDefsMap[indexName]; ok && idx.HibernateStatus != Cold {
+		pindex, err = OpenPIndex(mgr, pindexPath)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error opening pindex: %s", err.Error())
+		}
+	} else {
+		log.Printf("manager: pindex %s is from a cold index.", pindexName)
+		// load PINDEX_META only if manager's dataDir is set
+		if mgr != nil && len(mgr.dataDir) > 0 {
+			log.Printf("manager: manager's data dir loaded...")
+			buf, err := ioutil.ReadFile(pindexPath +
+				string(os.PathSeparator) + PINDEX_META_FILENAME)
+			if err != nil {
+				return nil, fmt.Errorf("manager: error reading pindex meta file: %s",
+					err.Error())
+			}
+
+			err = json.Unmarshal(buf, pindex)
+			if err != nil {
+				return nil, fmt.Errorf("manager: error unmarshaling JSON: %s",
+					err.Error())
+			}
+		}
+	}
+	return pindex, nil
+}
+
 // ---------------------------------------------------------------
 
 // TempPathPrefix indicates the prefix string applied to
@@ -566,20 +604,6 @@ func (mgr *Manager) LoadDataDir() error {
 		}
 	}
 
-	indexDefs, _, err := CfgGetIndexDefs(mgr.Cfg())
-	if err != nil {
-		return fmt.Errorf("manager: could not get index defs: %s",
-			err.Error())
-	}
-	// on startup with 0 indexes, specifying length leads to nil pointer err
-	indexDefsMap := make(map[string]*IndexDef)
-	// nil checks to avoid error on startup with 0 indexes.
-	if indexDefs != nil && indexDefs.IndexDefs != nil {
-		for _, idx := range indexDefs.IndexDefs {
-			indexDefsMap[idx.Name] = idx
-		}
-	}
-
 	size := len(dirEntries)
 	openReqs := make(chan *pindexLoadReq, size)
 	nWorkers := getWorkerCount(size)
@@ -600,23 +624,8 @@ func (mgr *Manager) LoadDataDir() error {
 					// 'p' already loaded
 					continue
 				}
-				var err error
-				pindex := &PIndex{Path: req.path}
 				// we have already validated the pindex paths, hence feeding directly
-				pindexName := PIndexNameFromPath(req.path)
-				if idx, ok := indexDefsMap[pindexName]; ok && idx.HibernateStatus != Cold {
-					pindex, err = OpenPIndex(mgr, req.path)
-				} else {
-					log.Printf("manager: pindex %s is from a cold index.", pindexName)
-					// load PINDEX_META only if manager's dataDir is set
-					if mgr != nil && len(mgr.dataDir) > 0 {
-						log.Printf("manager: manager's data dir loaded...")
-						buf, _ := ioutil.ReadFile(req.path +
-							string(os.PathSeparator) + PINDEX_META_FILENAME)
-
-						_ = json.Unmarshal(buf, pindex)
-					}
-				}
+				pindex, err := mgr.OpenPIndexBasedOnStatus(req.path)
 				if err != nil {
 					if strings.Contains(err.Error(), panicCallStack) {
 						log.Printf("manager: OpenPIndex error,"+
@@ -653,7 +662,6 @@ func (mgr *Manager) LoadDataDir() error {
 			// Skip the entry that doesn't match the naming pattern.
 			continue
 		}
-		// if the pindex belongs to a cold index, skip this too
 		openReqs <- &pindexLoadReq{path: path, pindexName: name}
 	}
 	close(openReqs)
