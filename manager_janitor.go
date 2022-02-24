@@ -344,7 +344,7 @@ func (mgr *Manager) activatePIndex(pi *pindexRestartReq) (*PIndex, error) {
 	// rename the pindex folder and name as per the new plan
 	newPath := mgr.PIndexPath(pi.planPIndexName)
 	if newPath != pi.pindex.Path {
-		log.Printf("proceeding to rename %s to %s", pi.pindex.Path, newPath)
+		log.Printf("janitor: proceeding to rename %s to %s", pi.pindex.Path, newPath)
 		err := os.Rename(pi.pindex.Path, newPath)
 		if err != nil {
 			cleanDir(pi.pindex.Path)
@@ -357,13 +357,14 @@ func (mgr *Manager) activatePIndex(pi *pindexRestartReq) (*PIndex, error) {
 		if err2 == nil { // old pindex dir still exists.
 			err := os.RemoveAll(pi.pindex.Path) // quick fix - deleting it.
 			if err != nil {
-				log.Printf("error deleting old pindex path")
-				return nil, err
+				return nil, fmt.Errorf("janitor: error removing path %s: %s",
+					pi.pindex.Path, err.Error())
 			}
 		}
 		_, err2 = os.Stat(newPath)
 		if os.IsNotExist(err2) {
-			log.Printf("error renaming to %s", newPath)
+			return nil, fmt.Errorf("janitor: error renaming to %s: %s",
+				newPath, err.Error())
 		}
 	}
 	pi2 := pi.pindex.Clone() //pi2 is the new pindex.
@@ -1038,7 +1039,6 @@ func CalcFeedsDelta(nodeUUID string, planPIndexes *PlanPIndexes,
 		}
 	}
 
-	//log.Printf("grouped pindexes: %+v", groupedPIndexes)
 	removedFeeds := map[string]bool{}
 
 	for feedName, feedPIndexes := range groupedPIndexes {
