@@ -200,6 +200,7 @@ type ClusterOptions struct {
 	SeqChecksTimeoutInSec              string `json:"seqChecksTimeoutInSec"`
 	DisableFileTransferRebalance       string `json:"disableFileTransferRebalance"`
 	EnablePartitionNodeStickiness      string `json:"enablePartitionNodeStickiness"`
+	Monitoring                         string `json:"monitoring"`
 }
 
 var ErrNoIndexDefs = errors.New("no index definitions found")
@@ -320,7 +321,6 @@ func (mgr *Manager) StartCfg() error {
 						mgr.GetIndexDefs(true)
 						continue
 					}
-
 					mgr.RefreshOptions()
 				}
 			}
@@ -557,23 +557,23 @@ func (mgr *Manager) OpenPIndexBasedOnStatus(pindexPath string) (*PIndex, error) 
 		if err != nil {
 			return nil, fmt.Errorf("manager: error opening pindex: %s", err.Error())
 		}
-	} else {
-		log.Printf("manager: pindex %s is from a cold index.", pindexName)
-		// load PINDEX_META only if manager's dataDir is set
-		if mgr != nil && len(mgr.dataDir) > 0 {
-			log.Printf("manager: manager's data dir loaded...")
-			buf, err := ioutil.ReadFile(pindexPath +
-				string(os.PathSeparator) + PINDEX_META_FILENAME)
-			if err != nil {
-				return nil, fmt.Errorf("manager: error reading pindex meta file: %s",
-					err.Error())
-			}
+		return pindex, nil
+	}
+	log.Printf("manager: pindex %s is from a cold index.", pindexName)
+	// load PINDEX_META only if manager's dataDir is set
+	if mgr != nil && len(mgr.dataDir) > 0 {
+		log.Printf("manager: manager's data dir loaded...")
+		buf, err := ioutil.ReadFile(pindexPath +
+			string(os.PathSeparator) + PINDEX_META_FILENAME)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error reading pindex meta file: %s",
+				err.Error())
+		}
 
-			err = json.Unmarshal(buf, pindex)
-			if err != nil {
-				return nil, fmt.Errorf("manager: error unmarshaling JSON: %s",
-					err.Error())
-			}
+		err = json.Unmarshal(buf, pindex)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error unmarshaling JSON: %s",
+				err.Error())
 		}
 	}
 	return pindex, nil
