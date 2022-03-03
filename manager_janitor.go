@@ -336,36 +336,21 @@ func (mgr *Manager) pindexesRestart(
 }
 
 func (mgr *Manager) activatePIndex(pi *pindexRestartReq) (*PIndex, error) {
-	err := mgr.stopPIndex(pi.pindex, false)
-	if err != nil {
-		log.Printf("janitor: error closing pindex %s", pi.pindex.Name)
-		return nil, err
-	}
 	// rename the pindex folder and name as per the new plan
 	newPath := mgr.PIndexPath(pi.planPIndexName)
 	if newPath != pi.pindex.Path {
 		log.Printf("janitor: proceeding to rename %s to %s", pi.pindex.Path, newPath)
 		err := os.Rename(pi.pindex.Path, newPath)
 		if err != nil {
-			cleanDir(pi.pindex.Path)
+			// removed cleanDir() for old path since in case there is a renaming error,
+			// the old path still needs to remain as is.
 			cleanDir(newPath)
 			return nil, fmt.Errorf("janitor: restartPIndex"+
 				" updating pindex: %s path: %s failed, err: %v",
 				pi.pindex.Name, newPath, err)
 		}
-		_, err2 := os.Stat(pi.pindex.Path)
-		if err2 == nil { // old pindex dir still exists.
-			err := os.RemoveAll(pi.pindex.Path) // quick fix - deleting it.
-			if err != nil {
-				return nil, fmt.Errorf("janitor: error removing path %s: %s",
-					pi.pindex.Path, err.Error())
-			}
-		}
-		_, err2 = os.Stat(newPath)
-		if os.IsNotExist(err2) {
-			return nil, fmt.Errorf("janitor: error renaming to %s: %s",
-				newPath, err.Error())
-		}
+		// removed checks for old path still existing/new path not created since if that
+		// does happen, it will be reflected as a renaming error.
 	}
 	pi2 := pi.pindex.Clone() //pi2 is the new pindex.
 	pi2.Name = pi.planPIndexName
@@ -375,23 +360,20 @@ func (mgr *Manager) activatePIndex(pi *pindexRestartReq) (*PIndex, error) {
 	// unreg the old pindex here, not in hibernatePIndexUtil, since after this, this pidx won't be used anymore
 	// in cold, it might need to be used again, so just hibernatePIndexUtil, not unreg.
 
-	// persist PINDEX_META only if manager's dataDir is set
-	if len(mgr.dataDir) > 0 {
-		// update the new indexdef param changes
-		buf, err := json.Marshal(pi2)
-		if err != nil {
-			cleanDir(newPath)
-			return nil, fmt.Errorf("janitor: tempRestartPIndex"+
-				" Marshal pindex: %s, err: %v", pi2.Name, err)
+	// update the new indexdef param changes
+	buf, err := json.Marshal(pi2)
+	if err != nil {
+		cleanDir(newPath)
+		return nil, fmt.Errorf("janitor: tempRestartPIndex"+
+			" Marshal pindex: %s, err: %v", pi2.Name, err)
 
-		}
-		err = ioutil.WriteFile(pi2.Path+string(os.PathSeparator)+
-			PINDEX_META_FILENAME, buf, 0600)
-		if err != nil {
-			cleanDir(pi2.Path)
-			return nil, fmt.Errorf("janitor: tempRestartPIndex could not save "+
-				"PINDEX_META_FILENAME,"+" path: %s, err: %v", pi2.Path, err)
-		}
+	}
+	err = ioutil.WriteFile(pi2.Path+string(os.PathSeparator)+
+		PINDEX_META_FILENAME, buf, 0600)
+	if err != nil {
+		cleanDir(pi2.Path)
+		return nil, fmt.Errorf("janitor: tempRestartPIndex could not save "+
+			"PINDEX_META_FILENAME,"+" path: %s, err: %v", pi2.Path, err)
 	}
 
 	// open the pindex and register
@@ -415,6 +397,11 @@ func (mgr *Manager) activatePIndex(pi *pindexRestartReq) (*PIndex, error) {
 }
 
 func (mgr *Manager) hibernatePIndex(pi *pindexRestartReq) error {
+	err := mgr.stopPIndex(pi.pindex, false)
+	if err != nil {
+		log.Printf("janitor: error closing pindex %s", pi.pindex.Name)
+		return err
+	}
 	newPIndex, err := mgr.activatePIndex(pi)
 	if err != nil {
 		return err
@@ -487,6 +474,11 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 				if err != nil {
 					log.Printf("janitor: error hibernating pindex %s: %e", pi.pindex.Name, err)
 				}
+			}
+			err := mgr.stopPIndex(pi.pindex, false)
+			if err != nil {
+				log.Printf("janitor: error closing pindex %s", pi.pindex.Name)
+				return err
 			}
 			_, err = mgr.activatePIndex(pi)
 			if err != nil {

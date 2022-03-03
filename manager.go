@@ -201,6 +201,7 @@ type ClusterOptions struct {
 	DisableFileTransferRebalance       string `json:"disableFileTransferRebalance"`
 	EnablePartitionNodeStickiness      string `json:"enablePartitionNodeStickiness"`
 	Monitoring                         string `json:"monitoring"`
+	MonitoringInterval                 string `json:"monitoringInterval"`
 }
 
 var ErrNoIndexDefs = errors.New("no index definitions found")
@@ -280,7 +281,7 @@ func (mgr *Manager) Start(register string) error {
 	if mgr.tagsMap == nil || mgr.tagsMap["pindex"] {
 		mldd := mgr.options["managerLoadDataDir"]
 		if mldd == "" || mldd == "true" {
-			err := mgr.LoadDataDir()
+			err := mgr.LoadDataDirBasedOnStatus()
 			if err != nil {
 				return err
 			}
@@ -543,6 +544,7 @@ type pindexLoadReq struct {
 
 // Opens a pindex if the parent index is Hot or Warm.
 func (mgr *Manager) OpenPIndexBasedOnStatus(pindexPath string) (*PIndex, error) {
+	// change this to get only single index def
 	_, indexDefsMap, err := mgr.GetIndexDefs(false)
 	if err != nil {
 		return nil, fmt.Errorf("manager: error getting index defs: %s",
@@ -585,6 +587,95 @@ func (mgr *Manager) OpenPIndexBasedOnStatus(pindexPath string) (*PIndex, error) 
 // name a temp directory.
 var TempPathPrefix = "temp$$"
 
+func (mgr *Manager) LoadDataDirBasedOnStatus() error {
+	log.Printf("manager: loading dataDir based on status...")
+	dirEntries, err := ioutil.ReadDir(mgr.dataDir)
+	if err != nil {
+		return fmt.Errorf("manager: could not read dataDir: %s, err: %v",
+			mgr.dataDir, err)
+	}
+
+	// clean up any left over temp download directories.
+	for i := len(dirEntries) - 1; i >= 0; i-- {
+		path := filepath.Join(mgr.dataDir, dirEntries[i].Name())
+		if strings.HasPrefix(dirEntries[i].Name(), TempPathPrefix) {
+			log.Printf("manager: purging temp directory: %s", path)
+			os.RemoveAll(path)
+			dirEntries = append(dirEntries[:i], dirEntries[i+1:]...)
+		}
+	}
+	size := len(dirEntries)
+	openReqs := make(chan *pindexLoadReq, size)
+	nWorkers := getWorkerCount(size)
+	var wg sync.WaitGroup
+	// spawn the openPIndex workers
+	for i := 0; i < nWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			for req := range openReqs {
+				// check whether the path still exists and if not then skip.
+				if _, err := os.Stat(req.path); os.IsNotExist(err) {
+					continue
+				}
+				// check whether pindex already loaded by the Janitor
+				// its possible after the first kick from a worker.
+				// if not loaded yet, then mark the pindex booting inprogress status
+				if !mgr.updateBootingStatus(req.pindexName, true) {
+					// 'p' already loaded
+					continue
+				}
+				pindex, err := mgr.OpenPIndexBasedOnStatus(req.path)
+				if err != nil {
+					if strings.Contains(err.Error(), panicCallStack) {
+						log.Printf("manager: OpenPIndex error,"+
+							" cleaning up and trying NewPIndex,"+
+							" path: %s, err: %v", req.path, err)
+						os.RemoveAll(req.path)
+					} else {
+						log.Errorf("manager: could not open pindex path: %s, err: %v",
+							req.path, err)
+					}
+				} else {
+					mgr.registerPIndex(pindex)
+					// kick the janitor only in case of successful pindex load
+					// to complete the boot up ceremony like feed hook ups.
+					// but for a failure, we would like to depend on the
+					// usual healing power of JanitorOnce loop.
+					// Note: The moment first work kick happens, then its the Janitor
+					// who handles the further loading of pindexes.
+					mgr.janitorCh <- &workReq{op: WORK_KICK}
+				}
+				// mark the pindex booting complete status
+				mgr.updateBootingStatus(req.pindexName, false)
+			}
+			wg.Done()
+		}()
+	}
+	// feed the openPIndex workers with pindex paths
+	for _, dirInfo := range dirEntries {
+		path := mgr.dataDir + string(os.PathSeparator) + dirInfo.Name()
+		// validate the pindex path here, if valid then
+		// send to workers for further processing
+		name, ok := mgr.ParsePIndexPath(path)
+		if !ok {
+			// Skip the entry that doesn't match the naming pattern.
+			continue
+		}
+		openReqs <- &pindexLoadReq{path: path, pindexName: name}
+	}
+	close(openReqs)
+
+	// log this message only after all workers have completed
+	go func() {
+		wg.Wait()
+		atomic.AddUint64(&mgr.stats.TotLoadDataDir, 1)
+		log.Printf("manager: loading dataDir... done")
+	}()
+
+	// leave the pindex loading task to the async workers and return here
+	return nil
+}
+
 // Walk the data dir and register pindexes for a Manager instance.
 func (mgr *Manager) LoadDataDir() error {
 	log.Printf("manager: loading dataDir...")
@@ -625,7 +716,8 @@ func (mgr *Manager) LoadDataDir() error {
 					continue
 				}
 				// we have already validated the pindex paths, hence feeding directly
-				pindex, err := mgr.OpenPIndexBasedOnStatus(req.path)
+				// pindex, err := mgr.OpenPIndexBasedOnStatus(req.path)
+				pindex, err := OpenPIndex(mgr, req.path)
 				if err != nil {
 					if strings.Contains(err.Error(), panicCallStack) {
 						log.Printf("manager: OpenPIndex error,"+
