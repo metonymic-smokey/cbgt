@@ -335,7 +335,7 @@ func (mgr *Manager) pindexesRestart(
 	return errs
 }
 
-func (mgr *Manager) activatePIndex(pi *pindexRestartReq) (*PIndex, error) {
+func (mgr *Manager) activatePIndex(pi *pindexRestartReq, complete bool) (*PIndex, error) {
 	// rename the pindex folder and name as per the new plan
 	newPath := mgr.PIndexPath(pi.planPIndexName)
 	if newPath != pi.pindex.Path {
@@ -376,39 +376,49 @@ func (mgr *Manager) activatePIndex(pi *pindexRestartReq) (*PIndex, error) {
 			"PINDEX_META_FILENAME,"+" path: %s, err: %v", pi2.Path, err)
 	}
 
-	// open the pindex and register
-	// since this is done for hot indexes, an open pidx intuitively makes sense since
-	// a hot pidx is one that is queried freq and so it should be open
-	pindex, err := OpenPIndex(mgr, pi2.Path)
-	if err != nil {
-		log.Printf("error in opening path %s", pi2.Path)
-		cleanDir(pi.pindex.Path)
-		return nil, fmt.Errorf("janitor: tempRestartPIndex could not open "+
-			" pindex path: %s, err: %v", pi2.Path, err)
+	pi2.closed = false
+	if complete {
+		restart := func() {
+			go restartPIndex(mgr, pi2)
+		}
+		impl, dest, err := OpenPIndexImplUsing(pi2.IndexType, pi2.Path,
+			pi2.IndexParams, restart)
+		if err != nil {
+			return nil, fmt.Errorf("pindex: could not open indexType: %s,"+
+				" path: %s, err: %v", pi2.IndexType, pi2.Path, err)
+		}
+
+		pi2.Impl = impl
+		pi2.Dest = dest
 	}
-	err = mgr.registerPIndex(pindex)
+
+	pi2.sourcePartitionsMap = map[string]bool{}
+	for _, partition := range strings.Split(pi2.SourcePartitions, ",") {
+		pi2.sourcePartitionsMap[partition] = true
+	}
+	err = mgr.registerPIndex(pi2)
 	if err != nil {
-		log.Printf("error in registering pindex %s", pindex.Name)
-		cleanDir(pindex.Path)
+		log.Printf("error in registering pindex %s", pi2.Name)
+		cleanDir(pi2.Path)
 		return nil, fmt.Errorf("janitor: tempRestartPIndex failed to "+
-			"register pindex: %s, err: %v", pindex.Name, err)
+			"register pindex: %s, err: %v", pi2.Name, err)
 	}
-	return pindex, nil
+	return pi2, nil
 }
 
-func (mgr *Manager) hibernatePIndex(pi *pindexRestartReq) error {
+func (mgr *Manager) hibernatePIndex(pi *pindexRestartReq, complete bool) error {
 	err := mgr.stopPIndex(pi.pindex, false)
 	if err != nil {
 		log.Printf("janitor: error closing pindex %s", pi.pindex.Name)
 		return err
 	}
-	newPIndex, err := mgr.activatePIndex(pi)
+	newPIndex, err := mgr.activatePIndex(pi, false)
 	if err != nil {
 		return err
 	}
 	if newPIndex != nil {
 		log.Printf("janitor: hibernating pindex %s", newPIndex.Name)
-		err = mgr.hibernatePIndexUtil(newPIndex)
+		err = mgr.hibernatePIndexUtil(newPIndex, false) // complete not needed
 		if err != nil {
 			return err
 		}
@@ -470,7 +480,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	for _, pi := range pindexesToActivate {
 		if pi.pindex != nil {
 			if !pi.pindex.closed { // in case, closing when cold was interrupted/didn't happen
-				err = mgr.hibernatePIndexUtil(pi.pindex)
+				err = mgr.hibernatePIndexUtil(pi.pindex, true) // complete needed?
 				if err != nil {
 					log.Printf("janitor: error hibernating pindex %s: %e", pi.pindex.Name, err)
 				}
@@ -480,7 +490,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 				log.Printf("janitor: error closing pindex %s", pi.pindex.Name)
 				return err
 			}
-			_, err = mgr.activatePIndex(pi)
+			_, err = mgr.activatePIndex(pi, true)
 			if err != nil {
 				log.Printf("janitor: error temp opening pindex: %e", err)
 			}
@@ -489,7 +499,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	log.Printf("janitor: pindexes to hibernate: %d", len(pindexesToHibernate))
 	for _, pi := range pindexesToHibernate {
 		log.Printf(" pindex: %v; UUID: %v", pi.pindex.Name, pi.pindex.IndexUUID)
-		err = mgr.hibernatePIndex(pi)
+		err = mgr.hibernatePIndex(pi, true)
 		if err != nil {
 			log.Printf("janitor: error temp opening pindex: %e", err)
 		}
@@ -568,9 +578,6 @@ func filterFeedable(addFeeds [][]*PIndex) (rv [][]*PIndex) {
 	for _, pindexes := range addFeeds {
 		plist := make([]*PIndex, 0, len(pindexes))
 		for _, pindex := range pindexes {
-			if pindex.closed { //closed pindexes are not feedable
-				continue
-			}
 			ready, err := pindex.IsFeedable()
 			if ready && err == nil {
 				plist = append(plist, pindex)

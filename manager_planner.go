@@ -84,21 +84,24 @@ func NoopPlannerHook(x PlannerHookInfo) (PlannerHookInfo, bool, error) {
 }
 
 // stops a pindex without unregistering or removing files from disk
-func (mgr *Manager) hibernatePIndexUtil(pindex *PIndex) error {
+func (mgr *Manager) hibernatePIndexUtil(pindex *PIndex, complete bool) error {
 	// First, stop any feeds that might be sending to the pindex's dest.
 	log.Printf("temporarily closed pindex %s", pindex.Name)
-	feeds, _ := mgr.CurrentMaps()
-	for _, feed := range feeds {
-		for _, dest := range feed.Dests() {
-			if dest == pindex.Dest {
-				err := mgr.stopFeed(feed)
-				if err != nil {
-					return err
+	if complete {
+		feeds, _ := mgr.CurrentMaps()
+		for _, feed := range feeds {
+			for _, dest := range feed.Dests() {
+				if dest == pindex.Dest {
+					err := mgr.stopFeed(feed)
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
 
+	// all types of indexes(h/w/c) have non-nil Dests, hence no check for completeness
 	if pindex.Dest != nil {
 		buf := bytes.NewBuffer(nil)
 		buf.Write([]byte(fmt.Sprintf(
