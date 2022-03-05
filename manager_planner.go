@@ -9,14 +9,12 @@
 package cbgt
 
 import (
-	"bytes"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"sort"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/couchbase/blance"
 	log "github.com/couchbase/clog"
@@ -81,41 +79,6 @@ type PlannerHookInfo struct {
 // A NoopPlannerHook is a no-op planner hook that just returns its input.
 func NoopPlannerHook(x PlannerHookInfo) (PlannerHookInfo, bool, error) {
 	return x, false, nil
-}
-
-// stops a pindex without unregistering or removing files from disk
-func (mgr *Manager) hibernatePIndexUtil(pindex *PIndex, complete bool) error {
-	// First, stop any feeds that might be sending to the pindex's dest.
-	log.Printf("temporarily closed pindex %s", pindex.Name)
-	if complete {
-		feeds, _ := mgr.CurrentMaps()
-		for _, feed := range feeds {
-			for _, dest := range feed.Dests() {
-				if dest == pindex.Dest {
-					err := mgr.stopFeed(feed)
-					if err != nil {
-						return err
-					}
-				}
-			}
-		}
-	}
-
-	// all types of indexes(h/w/c) have non-nil Dests, hence no check for completeness
-	if pindex.Dest != nil {
-		buf := bytes.NewBuffer(nil)
-		buf.Write([]byte(fmt.Sprintf(
-			`{"event":"hibernatePIndexUtil","name":"%s","time":"%s","stats":`,
-			pindex.Name, time.Now().Format(time.RFC3339Nano))))
-		err := pindex.Dest.Stats(buf)
-		if err == nil {
-			buf.Write(JsonCloseBrace)
-			mgr.AddEvent(buf.Bytes())
-		}
-	}
-
-	// pindex.closed = true // error: no planpindexes
-	return pindex.Close(false) // always false since it never needs to be removed
 }
 
 // -------------------------------------------------------
