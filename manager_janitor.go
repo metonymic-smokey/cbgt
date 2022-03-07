@@ -644,26 +644,15 @@ func classifyAddRemoveRestartPIndexes(mgr *Manager, addPlanPIndexes []*PlanPInde
 					planPIndexesToAdd = append(planPIndexesToAdd, planPIndexes...)
 					continue
 				}
-				if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
+				pc := phaseChange(configAnalyzeReq)
+				if pc == HIBERNATE_PINDEX || pc == PHASE_CHANGE {
 					pidxList := getPIndexesToRestart(pindexes, planPIndexes)
 					for _, pidx := range pidxList {
 						pindexesToTransition = append(pindexesToTransition,
 							&pindexStatusChangeReq{
 								pindex:         pidx.pindex,
 								planPIndexName: pidx.planPIndexName,
-								reqType:        HIBERNATE_PINDEX,
-							})
-					}
-					continue
-				}
-				if phaseChange(configAnalyzeReq) == PHASE_CHANGE {
-					pidxList := getPIndexesToRestart(pindexes, planPIndexes)
-					for _, pidx := range pidxList {
-						pindexesToTransition = append(pindexesToTransition,
-							&pindexStatusChangeReq{
-								pindex:         pidx.pindex,
-								planPIndexName: pidx.planPIndexName,
-								reqType:        PHASE_CHANGE,
+								reqType:        pc,
 							})
 					}
 					continue
@@ -744,26 +733,18 @@ func advPIndexClassifier(indexPIndexMap map[string][]*PIndex,
 						pindexesToRemove = append(pindexesToRemove, pindex)
 						continue
 					}
-					if phaseChange(configAnalyzeReq) == HIBERNATE_PINDEX {
+					pc := phaseChange(configAnalyzeReq)
+					if pc == HIBERNATE_PINDEX || pc == PHASE_CHANGE {
 						pidx := newPIndexRestartReq(targetPlan, pindex)
 						pindexesToTransition = append(pindexesToTransition, &pindexStatusChangeReq{
 							pindex:         pidx.pindex,
 							planPIndexName: pidx.planPIndexName,
-							reqType:        HIBERNATE_PINDEX,
+							reqType:        pc,
 						})
 						restartable[targetPlan.Name] = struct{}{}
 						continue
 					}
-					if phaseChange(configAnalyzeReq) == PHASE_CHANGE {
-						pidx := newPIndexRestartReq(targetPlan, pindex)
-						pindexesToTransition = append(pindexesToTransition, &pindexStatusChangeReq{
-							pindex:         pidx.pindex,
-							planPIndexName: pidx.planPIndexName,
-							reqType:        PHASE_CHANGE,
-						})
-						restartable[targetPlan.Name] = struct{}{}
-						continue
-					} else if pindexImplType.AnalyzeIndexDefUpdates != nil &&
+					if pindexImplType.AnalyzeIndexDefUpdates != nil &&
 						pindexImplType.AnalyzeIndexDefUpdates(configAnalyzeReq) ==
 							PINDEXES_RESTART {
 						pindexesToRestart = append(pindexesToRestart,
