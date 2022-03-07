@@ -360,7 +360,6 @@ func (mgr *Manager) activatePIndex(pi *pindexStatusChangeReq, complete bool) (*P
 	pi2 := pi.pindex.Clone() //pi2 is the new pindex.
 	pi2.Name = pi.planPIndexName
 	pi2.Path = newPath
-	// pi2.closed = false // try to incorporate stopPIndex()
 
 	// update the new indexdef param changes
 	buf, err := json.Marshal(pi2)
@@ -377,7 +376,6 @@ func (mgr *Manager) activatePIndex(pi *pindexStatusChangeReq, complete bool) (*P
 	}
 	// renaming only after writing new pindex meta
 
-	log.Printf("status of pindex closed before closing: %s", pi2.closed)
 	if complete {
 		if pi2.closed {
 			pi2.closed = false
@@ -385,7 +383,6 @@ func (mgr *Manager) activatePIndex(pi *pindexStatusChangeReq, complete bool) (*P
 		restart := func() {
 			go restartPIndex(mgr, pi2)
 		}
-		// are the feeds added here?
 		impl, dest, err := OpenPIndexImplUsing(pi2.IndexType, pi2.Path,
 			pi2.IndexParams, restart)
 		if err != nil {
@@ -414,32 +411,35 @@ func (mgr *Manager) hibernatePIndex(pi *pindexStatusChangeReq, complete bool) er
 
 // This function is a wrapper function for the specific functions used for
 // transitioning pindexes, based on the request type.
-func (mgr *Manager) transitionPIndex(pi *pindexStatusChangeReq) error {
-	err := mgr.stopPIndex(pi.pindex, false)
-	if err != nil {
-		return fmt.Errorf("janitor: error closing pindex %s: %e",
-			pi.pindex.Name, err)
-	}
-	var complete bool
-	if pi.reqType == PHASE_CHANGE {
-		complete = true // complete activation required
-	} else {
-		complete = false
-	}
-	log.Printf("pindex %s being activated", pi.pindex.Name)
-	pi.pindex, err = mgr.activatePIndex(pi, complete)
-	if err != nil {
-		return fmt.Errorf("janitor: error activating pindex: %s",
-			err.Error())
-	}
-	if pi.reqType == HIBERNATE_PINDEX {
-		log.Printf("pindex %s being hibernated", pi.pindex.Name)
-		err = mgr.hibernatePIndex(pi, complete)
+func (mgr *Manager) transitionPIndex(pindexesToTransition []*pindexStatusChangeReq) error {
+
+	for _, pi := range pindexesToTransition {
+		err := mgr.stopPIndex(pi.pindex, false)
 		if err != nil {
-			return fmt.Errorf("janitor: error hibernating pindex: %s",
+			return fmt.Errorf("janitor: error closing pindex %s: %e",
+				pi.pindex.Name, err)
+		}
+		var complete bool
+		if pi.reqType == PHASE_CHANGE {
+			complete = true // complete activation required
+		} else {
+			complete = false
+		}
+		pi.pindex, err = mgr.activatePIndex(pi, complete)
+		if err != nil {
+			return fmt.Errorf("janitor: error activating pindex: %s",
 				err.Error())
 		}
+		if pi.reqType == HIBERNATE_PINDEX {
+			log.Printf("pindex %s being hibernated", pi.pindex.Name)
+			err = mgr.hibernatePIndex(pi, complete)
+			if err != nil {
+				return fmt.Errorf("janitor: error hibernating pindex: %s",
+					err.Error())
+			}
+		}
 	}
+
 	return nil
 }
 
@@ -490,9 +490,7 @@ func (mgr *Manager) JanitorOnce(reason string) error {
 	}
 
 	log.Printf("janitor: pindexes to transition: %d", len(pindexesToTransition))
-	for _, pi := range pindexesToTransition {
-		mgr.transitionPIndex(pi)
-	}
+	mgr.transitionPIndex(pindexesToTransition)
 
 	// restart any of the pindexes so that they can
 	// adopt the updated indexDef parameters, ex: storeOptions
@@ -701,12 +699,9 @@ func phaseChange(configAnalyzeReq *ConfigAnalyzeRequest) string {
 func advPIndexClassifier(indexPIndexMap map[string][]*PIndex,
 	indexPlanPIndexMap map[string][]*PlanPIndex) (planPIndexesToAdd []*PlanPIndex,
 	pindexesToRemove []*PIndex, pindexesToRestart []*pindexRestartReq,
-	// pindexesToHibernate, pindexesToActivate []*pindexRestartReq) {
 	pindexesToTransition []*pindexStatusChangeReq) {
 	pindexesToRestart = make([]*pindexRestartReq, 0)
 	pindexesToRemove = make([]*PIndex, 0)
-	// pindexesToHibernate = make([]*pindexRestartReq, 0)
-	// pindexesToActivate = make([]*pindexRestartReq, 0)
 	pindexesToTransition = make([]*pindexStatusChangeReq, 0)
 	planPIndexesToAdd = make([]*PlanPIndex, 0)
 

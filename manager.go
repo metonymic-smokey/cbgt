@@ -544,17 +544,16 @@ type pindexLoadReq struct {
 
 // Opens a pindex if the parent index is Hot or Warm.
 func (mgr *Manager) OpenPIndexBasedOnStatus(pindexPath string) (*PIndex, error) {
-	// change this to get only single index def
-	_, indexDefsMap, err := mgr.GetIndexDefs(false)
-	if err != nil {
-		return nil, fmt.Errorf("manager: error getting index defs: %s",
-			err.Error())
-	}
-
 	pindex := &PIndex{Path: pindexPath}
 	pindexName := PIndexNameFromPath(pindexPath)
 	indexName := IndexNameFromPIndexName(pindexName)
-	if idx, ok := indexDefsMap[indexName]; ok && idx.HibernateStatus != Cold {
+	indexDef, _, err := mgr.GetIndexDef(indexName, false)
+	if err != nil {
+		return nil, fmt.Errorf("manager: error getting index def: %s",
+			err.Error())
+	}
+
+	if indexDef.HibernateStatus != Cold {
 		pindex, err = OpenPIndex(mgr, pindexPath)
 		if err != nil {
 			return nil, fmt.Errorf("manager: error opening pindex: %s", err.Error())
