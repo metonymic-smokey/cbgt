@@ -337,7 +337,7 @@ func (h *IndexStatusHandler) ServeHTTP(
 		indexStatus = InProgress
 	}
 
-	_, _, missingPIndexes, err := h.mgr.ClassifyPIndexes(indexName, "",
+	_, _, missingPIndexes,_, err := h.mgr.ClassifyPIndexes(indexName, "",
 		planPIndexes, nodeDefs, cbgt.PlanPIndexFilters["canRead"])
 	if err != nil {
 		ShowError(w, req, fmt.Sprintf("rest_index: ClassifyPIndexes, err: %v",

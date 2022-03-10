@@ -200,6 +200,8 @@ type ClusterOptions struct {
 	SeqChecksTimeoutInSec              string `json:"seqChecksTimeoutInSec"`
 	DisableFileTransferRebalance       string `json:"disableFileTransferRebalance"`
 	EnablePartitionNodeStickiness      string `json:"enablePartitionNodeStickiness"`
+	Monitoring                         string `json:"monitoring"`
+	MonitoringInterval                 string `json:"monitoringInterval"`
 }
 
 var ErrNoIndexDefs = errors.New("no index definitions found")
@@ -320,7 +322,6 @@ func (mgr *Manager) StartCfg() error {
 						mgr.GetIndexDefs(true)
 						continue
 					}
-
 					mgr.RefreshOptions()
 				}
 			}
@@ -541,6 +542,44 @@ type pindexLoadReq struct {
 	path, pindexName string
 }
 
+// Opens a pindex if the parent index is Hot or Warm.
+func (mgr *Manager) OpenPIndexBasedOnStatus(pindexPath string) (*PIndex, error) {
+	pindex := &PIndex{Path: pindexPath}
+	pindexName := PIndexNameFromPath(pindexPath)
+	indexName := IndexNameFromPIndexName(pindexName)
+	indexDef, _, err := mgr.GetIndexDef(indexName, false)
+	if err != nil {
+		return nil, fmt.Errorf("manager: error getting index def: %s",
+			err.Error())
+	}
+
+	if indexDef.HibernateStatus != Cold {
+		pindex, err = OpenPIndex(mgr, pindexPath)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error opening pindex: %s", err.Error())
+		}
+		return pindex, nil
+	}
+	log.Printf("manager: pindex %s is from a cold index.", pindexName)
+	// load PINDEX_META only if manager's dataDir is set
+	if mgr != nil && len(mgr.dataDir) > 0 {
+		log.Printf("manager: manager's data dir loaded...")
+		buf, err := ioutil.ReadFile(pindexPath +
+			string(os.PathSeparator) + PINDEX_META_FILENAME)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error reading pindex meta file: %s",
+				err.Error())
+		}
+
+		err = json.Unmarshal(buf, pindex)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error unmarshaling JSON: %s",
+				err.Error())
+		}
+	}
+	return pindex, nil
+}
+
 // ---------------------------------------------------------------
 
 // TempPathPrefix indicates the prefix string applied to
@@ -587,7 +626,7 @@ func (mgr *Manager) LoadDataDir() error {
 					continue
 				}
 				// we have already validated the pindex paths, hence feeding directly
-				pindex, err := OpenPIndex(mgr, req.path)
+				pindex, err := mgr.OpenPIndexBasedOnStatus(req.path)
 				if err != nil {
 					if strings.Contains(err.Error(), panicCallStack) {
 						log.Printf("manager: OpenPIndex error,"+

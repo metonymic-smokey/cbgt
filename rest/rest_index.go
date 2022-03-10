@@ -170,13 +170,25 @@ func (h *CountHandler) ServeHTTP(
 		return
 	}
 
-	count, err :=
-		pindexImplType.Count(h.mgr, indexName, indexUUID)
+	indexDef, _, err := h.mgr.GetIndexDef(indexName, false)
 	if err != nil {
-		ShowError(w, req, fmt.Sprintf("rest_index: Count,"+
+		ShowError(w, req, fmt.Sprintf("rest_index: getting index defs,"+
 			" indexName: %s, err: %v",
 			indexName, err), http.StatusInternalServerError)
 		return
+	}
+	var count uint64
+	if indexDef.HibernateStatus != cbgt.Cold {
+		count, err =
+			pindexImplType.Count(h.mgr, indexName, indexUUID)
+		if err != nil {
+			ShowError(w, req, fmt.Sprintf("rest_index: Count,"+
+				" indexName: %s, err: %v",
+				indexName, err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		count = 0 // since 0 docs processed by cold pindexes
 	}
 
 	rv := struct {
@@ -417,7 +429,6 @@ func (h *IndexControlHandler) ServeHTTP(
 }
 
 // ---------------------------------------------------
-
 // TaskRequestHandler is a REST handler for submitting a task
 // request on an index.
 type TaskRequestHandler struct {
@@ -558,7 +569,15 @@ func (h *CountPIndexHandler) ServeHTTP(
 			" no pindex, pindexName: %s", pindexName), http.StatusBadRequest)
 		return
 	}
-	if pindex.Dest == nil {
+	// check here for cold indexes
+	indexDef, _, err := h.mgr.GetIndexDef(pindex.IndexName, false)
+	if err != nil {
+		ShowError(w, req, fmt.Sprintf("rest_index: error getting index def: %s",
+			err.Error()), http.StatusBadRequest)
+		return
+	}
+	if pindex.Dest == nil && indexDef.HibernateStatus != cbgt.Cold {
+		// don't apply to cold indexes
 		ShowError(w, req, fmt.Sprintf("rest_index: CountPIndex,"+
 			" no pindex.Dest, pindexName: %s", pindexName), http.StatusBadRequest)
 		return
@@ -582,12 +601,16 @@ func (h *CountPIndexHandler) ServeHTTP(
 		}
 	}
 
-	count, err := pindex.Dest.Count(pindex, cancelCh)
-	if err != nil {
-		ShowError(w, req, fmt.Sprintf("rest_index: CountPIndex,"+
-			" pindexName: %s, err: %v", pindexName, err),
-			http.StatusBadRequest)
-		return
+	// check for cold indexes here too
+	var count uint64
+	if indexDef.HibernateStatus != cbgt.Cold {
+		count, err = pindex.Dest.Count(pindex, cancelCh)
+		if err != nil {
+			ShowError(w, req, fmt.Sprintf("rest_index: CountPIndex,"+
+				" pindexName: %s, err: %v", pindexName, err),
+				http.StatusBadRequest)
+			return
+		}
 	}
 
 	rv := struct {

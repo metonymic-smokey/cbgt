@@ -20,6 +20,12 @@ import (
 	"github.com/couchbase/blance"
 )
 
+const (
+	Hot int = iota + 1
+	Warm
+	Cold
+)
+
 // JSON/struct definitions of what the Manager stores in the Cfg.
 // NOTE: You *must* update VERSION if you change these
 // definitions or the planning algorithms change.
@@ -34,15 +40,16 @@ type IndexDefs struct {
 
 // An IndexDef is a logical index definition.
 type IndexDef struct {
-	Type         string     `json:"type"` // Ex: "blackhole", etc.
-	Name         string     `json:"name"`
-	UUID         string     `json:"uuid"` // Like a revision id.
-	Params       string     `json:"params"`
-	SourceType   string     `json:"sourceType"`
-	SourceName   string     `json:"sourceName,omitempty"`
-	SourceUUID   string     `json:"sourceUUID,omitempty"`
-	SourceParams string     `json:"sourceParams,omitempty"` // Optional connection info.
-	PlanParams   PlanParams `json:"planParams,omitempty"`
+	Type            string     `json:"type"` // Ex: "blackhole", etc.
+	Name            string     `json:"name"`
+	UUID            string     `json:"uuid"` // Like a revision id.
+	Params          string     `json:"params"`
+	SourceType      string     `json:"sourceType"`
+	SourceName      string     `json:"sourceName,omitempty"`
+	SourceUUID      string     `json:"sourceUUID,omitempty"`
+	SourceParams    string     `json:"sourceParams,omitempty"` // Optional connection info.
+	PlanParams      PlanParams `json:"planParams,omitempty"`
+	HibernateStatus int        `json:"hibernateStatus"`
 
 	// NOTE: Any auth credentials to access datasource, if any, may be
 	// stored as part of SourceParams.
@@ -55,13 +62,14 @@ type IndexDef struct {
 // struct definition.  If you change IndexDef struct, you must change
 // this indexDefBase definition, too; and also see defs_json.go.
 type indexDefBase struct {
-	Type       string     `json:"type"` // Ex: "blackhole", etc.
-	Name       string     `json:"name"`
-	UUID       string     `json:"uuid"` // Like a revision id.
-	SourceType string     `json:"sourceType"`
-	SourceName string     `json:"sourceName,omitempty"`
-	SourceUUID string     `json:"sourceUUID,omitempty"`
-	PlanParams PlanParams `json:"planParams,omitempty"`
+	Type            string     `json:"type"` // Ex: "blackhole", etc.
+	Name            string     `json:"name"`
+	UUID            string     `json:"uuid"` // Like a revision id.
+	SourceType      string     `json:"sourceType"`
+	SourceName      string     `json:"sourceName,omitempty"`
+	SourceUUID      string     `json:"sourceUUID,omitempty"`
+	PlanParams      PlanParams `json:"planParams,omitempty"`
+	HibernateStatus int        `json:"hibernateStatus"`
 }
 
 // A PlanParams holds input parameters to the planner, that control
@@ -231,6 +239,7 @@ type PlanPIndex struct {
 	SourceUUID       string `json:"sourceUUID,omitempty"`
 	SourceParams     string `json:"sourceParams,omitempty"` // Optional connection info.
 	SourcePartitions string `json:"sourcePartitions"`
+	Hibernate        int    `json:"hibernate"`
 
 	Nodes map[string]*PlanPIndexNode `json:"nodes"` // Keyed by NodeDef.UUID.
 }
@@ -251,6 +260,7 @@ type planPIndexBase struct {
 	SourceName       string `json:"sourceName,omitempty"`
 	SourceUUID       string `json:"sourceUUID,omitempty"`
 	SourcePartitions string `json:"sourcePartitions"`
+	Hibernate        int    `json:"hibernate"`
 
 	Nodes map[string]*PlanPIndexNode `json:"nodes"` // Keyed by NodeDef.UUID.
 }
@@ -600,6 +610,7 @@ func SamePlanPIndex(a, b *PlanPIndex) bool {
 		a.SourceUUID != b.SourceUUID ||
 		a.SourceParams != b.SourceParams ||
 		a.SourcePartitions != b.SourcePartitions ||
+		a.Hibernate != b.Hibernate ||
 		!reflect.DeepEqual(a.Nodes, b.Nodes) {
 		return false
 	}
