@@ -49,6 +49,11 @@ type PIndex struct {
 	closed bool
 }
 
+// Custom struct for 'hibernate' field
+type pindexHibernate struct {
+	Hibernate int `json:"hibernate,omitempty"`
+}
+
 // Note that these callbacks are invoked within the manager's sync mutex
 // context, it is the responsibility of the user to ensure that they do NOT
 // reacquire the manager mutex or any api that does within the callbacks.

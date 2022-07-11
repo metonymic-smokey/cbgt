@@ -464,7 +464,8 @@ func CalcPlan(mode string, indexDefs *IndexDefs, nodeDefs *NodeDefs,
 
 		// If the plan is frozen, CasePlanFrozen clones the previous
 		// plan for this index.
-		if CasePlanFrozen(indexDef, planPIndexesPrev, planPIndexes) {
+		if indexDef.HibernateStatus == Hot && CasePlanFrozen(indexDef, planPIndexesPrev, planPIndexes) {
+			log.Printf("Plan frozen for hot index: %s", indexDef.Name)
 			continue
 		}
 
@@ -647,6 +648,7 @@ func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 			SourceParams:     indexDef.SourceParams,
 			SourcePartitions: sourcePartitions,
 			Nodes:            make(map[string]*PlanPIndexNode),
+			Hibernate:        indexDef.HibernateStatus,
 		}
 
 		if planPIndexesOut != nil {
@@ -669,6 +671,32 @@ func SplitIndexDefIntoPlanPIndexes(indexDef *IndexDef, server string,
 	if len(sourcePartitionsCurr) > 0 || // Assign any leftover partitions.
 		len(planPIndexesForIndex) <= 0 { // Assign at least 1 PlanPIndex.
 		addPlanPIndex(sourcePartitionsCurr)
+	}
+
+	if indexDef.HibernateStatus == Cold {
+		for _, pidx := range planPIndexesForIndex {
+			pidx.Hibernate = Cold
+			for nodename := range pidx.Nodes {
+				pidx.Nodes[nodename].CanWrite =
+					DefaultColdPolicy.HibernationCriteria[0].Actions[0].AcceptIndexing
+			}
+		}
+	} else if indexDef.HibernateStatus == Warm {
+		for _, pidx := range planPIndexesForIndex {
+			pidx.Hibernate = Warm
+			for nodename := range pidx.Nodes {
+				pidx.Nodes[nodename].CanWrite =
+					DefaultWarmPolicy.HibernationCriteria[0].Actions[0].AcceptIndexing
+			}
+		}
+	} else if indexDef.HibernateStatus == Hot {
+		for _, pidx := range planPIndexesForIndex {
+			pidx.Hibernate = Hot
+			for nodename := range pidx.Nodes {
+				pidx.Nodes[nodename].CanWrite =
+					DefaultHotPolicy.HibernationCriteria[0].Actions[0].AcceptIndexing
+			}
+		}
 	}
 
 	return planPIndexesForIndex, nil
@@ -925,7 +953,8 @@ func sameIndexDefsExceptUUID(def1, def2 *IndexDef) bool {
 		def1.SourceName == def2.SourceName &&
 		def1.SourceType == def2.SourceType &&
 		def1.SourceUUID == def2.SourceUUID &&
-		def1.SourceParams == def2.SourceParams)
+		def1.SourceParams == def2.SourceParams &&
+		def1.HibernateStatus == def2.HibernateStatus)
 }
 
 // --------------------------------------------------------

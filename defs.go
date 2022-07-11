@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/couchbase/blance"
 )
@@ -23,6 +24,12 @@ import (
 // JSON/struct definitions of what the Manager stores in the Cfg.
 // NOTE: You *must* update VERSION if you change these
 // definitions or the planning algorithms change.
+
+const (
+	Hot int = iota + 1
+	Warm
+	Cold
+)
 
 // An IndexDefs is zero or more index definitions.
 type IndexDefs struct {
@@ -34,15 +41,16 @@ type IndexDefs struct {
 
 // An IndexDef is a logical index definition.
 type IndexDef struct {
-	Type         string     `json:"type"` // Ex: "blackhole", etc.
-	Name         string     `json:"name"`
-	UUID         string     `json:"uuid"` // Like a revision id.
-	Params       string     `json:"params"`
-	SourceType   string     `json:"sourceType"`
-	SourceName   string     `json:"sourceName,omitempty"`
-	SourceUUID   string     `json:"sourceUUID,omitempty"`
-	SourceParams string     `json:"sourceParams,omitempty"` // Optional connection info.
-	PlanParams   PlanParams `json:"planParams,omitempty"`
+	Type            string     `json:"type"` // Ex: "blackhole", etc.
+	Name            string     `json:"name"`
+	UUID            string     `json:"uuid"` // Like a revision id.
+	Params          string     `json:"params"`
+	SourceType      string     `json:"sourceType"`
+	SourceName      string     `json:"sourceName,omitempty"`
+	SourceUUID      string     `json:"sourceUUID,omitempty"`
+	SourceParams    string     `json:"sourceParams,omitempty"` // Optional connection info.
+	PlanParams      PlanParams `json:"planParams,omitempty"`
+	HibernateStatus int        `json:"hibernateStatus"`
 
 	// NOTE: Any auth credentials to access datasource, if any, may be
 	// stored as part of SourceParams.
@@ -55,13 +63,14 @@ type IndexDef struct {
 // struct definition.  If you change IndexDef struct, you must change
 // this indexDefBase definition, too; and also see defs_json.go.
 type indexDefBase struct {
-	Type       string     `json:"type"` // Ex: "blackhole", etc.
-	Name       string     `json:"name"`
-	UUID       string     `json:"uuid"` // Like a revision id.
-	SourceType string     `json:"sourceType"`
-	SourceName string     `json:"sourceName,omitempty"`
-	SourceUUID string     `json:"sourceUUID,omitempty"`
-	PlanParams PlanParams `json:"planParams,omitempty"`
+	Type            string     `json:"type"` // Ex: "blackhole", etc.
+	Name            string     `json:"name"`
+	UUID            string     `json:"uuid"` // Like a revision id.
+	SourceType      string     `json:"sourceType"`
+	SourceName      string     `json:"sourceName,omitempty"`
+	SourceUUID      string     `json:"sourceUUID,omitempty"`
+	PlanParams      PlanParams `json:"planParams,omitempty"`
+	HibernateStatus int        `json:"hibernateStatus"`
 }
 
 // A PlanParams holds input parameters to the planner, that control
@@ -126,6 +135,64 @@ type PlanParams struct {
 type NodePlanParam struct {
 	CanRead  bool `json:"canRead"`
 	CanWrite bool `json:"canWrite"`
+}
+
+// currently, the accepted value for criteria string is
+// "last_accessed_time"
+type condition struct {
+	Criteria map[string]time.Duration
+	Actions  []lifecycleAction
+}
+
+type HibernationPolicy struct {
+	HibernationCriteria []condition
+}
+
+type lifecycleAction struct {
+	AcceptIndexing bool `json:"ingestControl",omitempty`
+	AcceptPlanning bool `json:"planFreeze",omitempty`
+	Hibernate      bool `json:"hibernate",omitempty`
+}
+
+var defaultHotCondition = condition{
+	Actions: []lifecycleAction{{
+		AcceptPlanning: true,
+		AcceptIndexing: true,
+		Hibernate:      false},
+	},
+}
+
+var defaultWarmCondition = condition{
+	Criteria: map[string]time.Duration{
+		"last_accessed_time": 1 * time.Minute,
+	},
+	Actions: []lifecycleAction{{
+		AcceptPlanning: false,
+		AcceptIndexing: true},
+	},
+}
+
+var defaultColdCondition = condition{
+	Criteria: map[string]time.Duration{
+		"last_accessed_time": 3 * time.Minute,
+	},
+	Actions: []lifecycleAction{{
+		AcceptPlanning: false,
+		AcceptIndexing: false,
+		Hibernate:      true},
+	},
+}
+
+var DefaultHotPolicy = HibernationPolicy{
+	HibernationCriteria: []condition{defaultHotCondition},
+}
+
+var DefaultWarmPolicy = HibernationPolicy{
+	HibernationCriteria: []condition{defaultWarmCondition},
+}
+
+var DefaultColdPolicy = HibernationPolicy{
+	HibernationCriteria: []condition{defaultColdCondition},
 }
 
 // ------------------------------------------------------------------------
@@ -231,6 +298,7 @@ type PlanPIndex struct {
 	SourceUUID       string `json:"sourceUUID,omitempty"`
 	SourceParams     string `json:"sourceParams,omitempty"` // Optional connection info.
 	SourcePartitions string `json:"sourcePartitions"`
+	Hibernate        int    `json:"hibernate"`
 
 	Nodes map[string]*PlanPIndexNode `json:"nodes"` // Keyed by NodeDef.UUID.
 }
@@ -251,6 +319,7 @@ type planPIndexBase struct {
 	SourceName       string `json:"sourceName,omitempty"`
 	SourceUUID       string `json:"sourceUUID,omitempty"`
 	SourcePartitions string `json:"sourcePartitions"`
+	Hibernate        int    `json:"hibernate"`
 
 	Nodes map[string]*PlanPIndexNode `json:"nodes"` // Keyed by NodeDef.UUID.
 }
@@ -600,6 +669,7 @@ func SamePlanPIndex(a, b *PlanPIndex) bool {
 		a.SourceUUID != b.SourceUUID ||
 		a.SourceParams != b.SourceParams ||
 		a.SourcePartitions != b.SourcePartitions ||
+		a.Hibernate != b.Hibernate ||
 		!reflect.DeepEqual(a.Nodes, b.Nodes) {
 		return false
 	}

@@ -115,6 +115,7 @@ func indexDefToBase(indexDef *IndexDef, base *indexDefBase) {
 	base.SourceName = indexDef.SourceName
 	base.SourceUUID = indexDef.SourceUUID
 	base.PlanParams = indexDef.PlanParams
+	base.HibernateStatus = indexDef.HibernateStatus
 }
 
 // indexDefFromBase copies non-envelope'able fields from the
@@ -127,6 +128,7 @@ func indexDefFromBase(base *indexDefBase, indexDef *IndexDef) {
 	indexDef.SourceName = base.SourceName
 	indexDef.SourceUUID = base.SourceUUID
 	indexDef.PlanParams = base.PlanParams
+	indexDef.HibernateStatus = base.HibernateStatus
 }
 
 // -------------------------------------------------------------------
@@ -237,6 +239,7 @@ func planPIndexToBase(planPIndex *PlanPIndex, base *planPIndexBase) {
 	base.SourceUUID = planPIndex.SourceUUID
 	base.SourcePartitions = planPIndex.SourcePartitions
 	base.Nodes = planPIndex.Nodes
+	base.Hibernate = planPIndex.Hibernate
 }
 
 // planPIndexFromBase copies non-envelope'able fields from the
@@ -252,4 +255,5 @@ func planPIndexFromBase(base *planPIndexBase, planPIndex *PlanPIndex) {
 	planPIndex.SourceUUID = base.SourceUUID
 	planPIndex.SourcePartitions = base.SourcePartitions
 	planPIndex.Nodes = base.Nodes
+	planPIndex.Hibernate = base.Hibernate
 }

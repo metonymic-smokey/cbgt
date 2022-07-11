@@ -121,6 +121,10 @@ func (h *CreateIndexHandler) RESTOpts(opts map[string]string) {
 		`HTTP 200 with body JSON of {"status": "ok"}` // TODO: Revisit 200 code.
 }
 
+type HibernateParam struct {
+	HibernateStatus int `json:"hibernate"`
+}
+
 func (h *CreateIndexHandler) ServeHTTP(
 	w http.ResponseWriter, req *http.Request) {
 	// TODO: Need more input validation (check source UUID's, etc).

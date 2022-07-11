@@ -201,6 +201,8 @@ type ClusterOptions struct {
 	DisableFileTransferRebalance       string `json:"disableFileTransferRebalance"`
 	EnablePartitionNodeStickiness      string `json:"enablePartitionNodeStickiness"`
 	DisableGeoPointSpatialPlugin       string `json:"disableGeoPointSpatialPlugin"`
+	Monitoring                         string `json:"monitoring"`
+	MonitoringInterval                 string `json:"monitoringInterval"`
 }
 
 var ErrNoIndexDefs = errors.New("no index definitions found")
@@ -540,6 +542,53 @@ func (mgr *Manager) updateBootingStatus(pindex string, status bool) bool {
 
 type pindexLoadReq struct {
 	path, pindexName string
+}
+
+// This function extracts the hibernation status for the given pindex.
+func extractPIndexHibernationStatus(buf []byte) (*pindexHibernate, error) {
+	tempPIndex := &pindexHibernate{}
+	err := json.Unmarshal(buf, tempPIndex)
+	if err != nil {
+		return nil, fmt.Errorf("manager: error unmarshaling JSON: %s",
+			err.Error())
+	}
+	return tempPIndex, nil
+}
+
+// Opens a pindex if the parent index is Hot or Warm.
+func (mgr *Manager) OpenPIndexBasedOnStatus(pindexPath string) (*PIndex, error) {
+	pindex := &PIndex{Path: pindexPath}
+	pindexName := PIndexNameFromPath(pindexPath)
+	pindexHibernate := &pindexHibernate{}
+	// load PINDEX_META only if manager's dataDir is set
+	if mgr != nil && len(mgr.dataDir) > 0 {
+		buf, err := ioutil.ReadFile(pindexPath +
+			string(os.PathSeparator) + PINDEX_META_FILENAME)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error reading pindex meta file: %s",
+				err.Error())
+		}
+
+		err = json.Unmarshal(buf, pindex)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error unmarshaling JSON: %s",
+				err.Error())
+		}
+		pindexHibernate, err = extractPIndexHibernationStatus(buf)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error unmarshaling JSON: %s",
+				err.Error())
+		}
+	}
+	if pindexHibernate.Hibernate != Cold {
+		pindex, err := OpenPIndex(mgr, pindexPath)
+		if err != nil {
+			return nil, fmt.Errorf("manager: error opening pindex: %s", err.Error())
+		}
+		return pindex, nil
+	}
+	log.Printf("manager: pindex %s is from a cold index.", pindexName)
+	return pindex, nil
 }
 
 // ---------------------------------------------------------------
